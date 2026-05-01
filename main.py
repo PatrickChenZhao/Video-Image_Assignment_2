@@ -34,7 +34,8 @@ from pynput.keyboard import Controller, Key
 DEBOUNCE_FRAMES = 3
 
 # 置信度阈值：只有最佳模型预测概率达到该值，才允许触发按键
-CONFIDENCE_THRESHOLD = 0.80
+# 如果某个手势总是能识别但不触发，可先调低到 0.50~0.70 之间排查。
+CONFIDENCE_THRESHOLD = 0.60
 
 # 连续未检测到手部的帧数达到该值后，释放所有游戏按键
 NO_HAND_RELEASE_FRAMES = 3
