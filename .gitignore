@@ -1,0 +1,35 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Generated datasets and models
+gesture_dataset.csv
+best_model.pkl
+svm_model.pkl
+knn_model.pkl
+scaler.pkl
+
+# Runtime logs
+latency_log.csv
+resource_log.csv
+
+# Local test outputs
+*.log
