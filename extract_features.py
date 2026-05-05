@@ -77,15 +77,23 @@ def extract_relative_features(
     # 只取检测到的第一只手，保证每张图片输出固定 60 维特征
     landmarks = result.multi_hand_landmarks[0].landmark
     wrist = landmarks[0]
+    middle_finger_mcp = landmarks[9]
+    base_distance = (
+        (middle_finger_mcp.x - wrist.x) ** 2
+        + (middle_finger_mcp.y - wrist.y) ** 2
+        + (middle_finger_mcp.z - wrist.z) ** 2
+    ) ** 0.5
+    if base_distance < 1e-6:
+        base_distance = 1e-6
 
     features: list[float] = []
     for landmark in landmarks[1:]:
         # 核心约束：以手腕点 Landmark 0 为原点，计算其余 20 个点的相对坐标
         features.extend(
             [
-                landmark.x - wrist.x,
-                landmark.y - wrist.y,
-                landmark.z - wrist.z,
+                (landmark.x - wrist.x) / base_distance,
+                (landmark.y - wrist.y) / base_distance,
+                (landmark.z - wrist.z) / base_distance,
             ]
         )
 

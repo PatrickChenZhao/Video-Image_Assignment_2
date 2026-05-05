@@ -25,6 +25,9 @@ import numpy as np
 import psutil
 from pynput.keyboard import Controller, Key
 
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
+
 
 # =========================
 # 可手动微调的全局常量
@@ -120,14 +123,22 @@ def extract_relative_features_from_landmarks(hand_landmarks) -> list[float]:
     """
     landmarks = hand_landmarks.landmark
     wrist = landmarks[0]
+    middle_finger_mcp = landmarks[9]
+    base_distance = (
+        (middle_finger_mcp.x - wrist.x) ** 2
+        + (middle_finger_mcp.y - wrist.y) ** 2
+        + (middle_finger_mcp.z - wrist.z) ** 2
+    ) ** 0.5
+    if base_distance < 1e-6:
+        base_distance = 1e-6
 
     features: list[float] = []
     for landmark in landmarks[1:]:
         features.extend(
             [
-                landmark.x - wrist.x,
-                landmark.y - wrist.y,
-                landmark.z - wrist.z,
+                (landmark.x - wrist.x) / base_distance,
+                (landmark.y - wrist.y) / base_distance,
+                (landmark.z - wrist.z) / base_distance,
             ]
         )
 
@@ -183,6 +194,15 @@ def predict_gesture_and_latency(
 
     if not result.multi_hand_landmarks:
         return None, None, False, None, None
+
+    for hand_landmarks in result.multi_hand_landmarks:
+        mp_drawing.draw_landmarks(
+            frame,
+            hand_landmarks,
+            mp.solutions.hands.HAND_CONNECTIONS,
+            mp_drawing_styles.get_default_hand_landmarks_style(),
+            mp_drawing_styles.get_default_hand_connections_style(),
+        )
 
     hand_landmarks = result.multi_hand_landmarks[0]
     features = extract_relative_features_from_landmarks(hand_landmarks)
