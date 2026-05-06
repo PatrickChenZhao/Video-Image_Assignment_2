@@ -1,19 +1,19 @@
 """
-Xbox 手柄横版跑酷射击小游戏
+Side-scrolling parkour shooter mini-game for Xbox controllers
 
-运行方式：
+How to run:
     python dino_game.py
 
-依赖：
+Dependencies:
     pip install pygame
 
-说明：
-    - 窗口大小固定为 800x400，游戏逻辑以 60 FPS 运行。
-    - 玩家固定在屏幕左侧，世界中的障碍物从右向左移动。
-    - Xbox 手柄按键映射：
-        A / Button 0：按住下蹲，松开站立
-        Y / Button 3：按下跳跃，仅在地面时生效
-        B / Button 1：按下射击，带短暂冷却
+Description:
+    - The window size is fixed at 800x400, and the game runs at 60 FPS.
+    - The player is fixed on the left side of the screen, and obstacles in the world move from right to left.
+    - Xbox controller button mapping:
+        A / Button 0: Hold to crouch, release to stand
+        Y / Button 3: Press to jump (only works when on the ground)
+        B / Button 1: Press to shoot (with a short cooldown)
 """
 
 import os
@@ -24,26 +24,26 @@ import pygame
 
 
 # =========================
-# 基础常量配置
+# Basic Constant Configuration
 # =========================
 
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 400
 FPS = 60
 
-# 固定黑色地平线。玩家和地面仙人掌都站在这条线上。
+# Set a fixed black horizon line. Both the player and the cacti on the ground stand on this line.
 HORIZON_Y = 330
 
-# 玩家在屏幕左侧的固定 x 坐标。
+# The player is at a fixed x-coordinate on the left side of the screen.
 PLAYER_X = 90
 PLAYER_NORMAL_WIDTH = 58
 PLAYER_NORMAL_HEIGHT = 82
 
-# 物理参数。数值按 60 FPS 调整，手感偏街机，响应清晰。
+# Physical parameters. The settings are optimized for 60 FPS, with an arcade-style feel and crisp responsiveness.
 GRAVITY = 0.85
 JUMP_VELOCITY = -17.0
 
-# 障碍和子弹参数。
+# Obstacle and bullet parameters.
 OBSTACLE_SPEED_START = 6.0
 OBSTACLE_SPEED_MAX = 13.0
 OBSTACLE_SPAWN_MIN_MS = 900
@@ -52,12 +52,12 @@ BULLET_SPEED = 12
 SHOOT_COOLDOWN_MS = 280
 BULLET_CENTER_Y = HORIZON_Y - PLAYER_NORMAL_HEIGHT // 2
 
-# Xbox 常见按键编号。不同驱动可能略有差异，但题目指定按此映射实现。
+# Common Xbox button assignments. These may vary slightly depending on the driver, but the question specifies that this mapping should be used.
 BUTTON_A = 0
 BUTTON_B = 1
 BUTTON_Y = 3
 
-# 颜色。
+# Color.
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 GRAY = (120, 120, 120)
@@ -66,18 +66,18 @@ BLUE = (40, 120, 230)
 
 
 def asset_path(filename):
-    """返回与脚本同目录的素材绝对路径，避免从其他目录运行时找不到图片。"""
+    """Return the absolute path of the assets in the same directory as the script to prevent images from being missing when the script is run from a different directory."""
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
 
 def masks_overlap(first_rect, first_mask, second_rect, second_mask):
-    """使用像素级 mask 判断两个对象是否发生真实可见区域重叠。"""
+    """Use a pixel-level mask to determine whether the visible areas of two objects actually overlap."""
     offset = (second_rect.x - first_rect.x, second_rect.y - first_rect.y)
     return first_mask.overlap(second_mask, offset) is not None
 
 
 class Player:
-    """玩家：负责站立、跳跃、下蹲、重力和绘制。"""
+    """Player: Responsible for standing, jumping, crouching, gravity, and rendering."""
 
     NORMAL_WIDTH = PLAYER_NORMAL_WIDTH
     NORMAL_HEIGHT = PLAYER_NORMAL_HEIGHT
@@ -85,7 +85,7 @@ class Player:
     DUCK_HEIGHT = 42
 
     def __init__(self, filename="robotman.png"):
-        # 玩家素材带 Alpha 通道，必须用 convert_alpha() 保留透明区域。
+        # Player assets include an alpha channel; you must use `convert_alpha()` to preserve transparent areas.
         self.image = pygame.image.load(asset_path(filename)).convert_alpha()
         self.image = pygame.transform.scale(
             self.image, (self.NORMAL_WIDTH, self.NORMAL_HEIGHT)
@@ -106,7 +106,7 @@ class Player:
         self.ducking = False
 
     def reset(self):
-        """恢复到初始站立状态。"""
+        """Return to the starting standing position."""
         self.rect.size = (self.NORMAL_WIDTH, self.NORMAL_HEIGHT)
         self.rect.x = PLAYER_X
         self.rect.bottom = HORIZON_Y
@@ -115,7 +115,7 @@ class Player:
         self.ducking = False
 
     def jump(self):
-        """仅当玩家站在地面上时允许跳跃。"""
+        """Jumping is only allowed when the player is standing on the ground."""
         if self.on_ground:
             self.velocity_y = JUMP_VELOCITY
             self.on_ground = False
@@ -124,9 +124,9 @@ class Player:
 
     def set_ducking(self, ducking):
         """
-        设置下蹲状态。
+        Set the crouching position.
 
-        下蹲只在地面上生效；空中不允许改变碰撞高度，避免空中“缩身”逃避障碍。
+        Crouching only works on the ground; you cannot change your collision height while in the air to avoid obstacles by “crouching” mid-air.
         """
         self.ducking = ducking and self.on_ground
         if self.ducking:
@@ -135,7 +135,7 @@ class Player:
             self._apply_standing_size()
 
     def _apply_standing_size(self):
-        """切换到站立碰撞盒，保持脚底仍在地平线上或当前空中位置。"""
+        """Switch to the standing collision box, keeping the soles of your feet on the ground or in their current position in the air."""
         bottom = self.rect.bottom
         self.rect.size = (self.NORMAL_WIDTH, self.NORMAL_HEIGHT)
         self.rect.x = PLAYER_X
@@ -144,7 +144,7 @@ class Player:
         self.mask = pygame.mask.from_surface(self.image)
 
     def _apply_duck_size(self):
-        """切换到下蹲碰撞盒，高度约为站立时的一半。"""
+        """Switch to the crouching collision box, which is about half the height of the standing position."""
         bottom = self.rect.bottom
         self.rect.size = (self.DUCK_WIDTH, self.DUCK_HEIGHT)
         self.rect.x = PLAYER_X
@@ -153,7 +153,7 @@ class Player:
         self.mask = pygame.mask.from_surface(self.image)
 
     def update(self):
-        """应用重力并处理落地。"""
+        """Use gravity and handle the landing."""
         if not self.on_ground:
             self.velocity_y += GRAVITY
             self.rect.y += int(self.velocity_y)
@@ -163,17 +163,17 @@ class Player:
                 self.velocity_y = 0.0
                 self.on_ground = True
 
-        # 如果刚落地且仍按着 A 键，主循环会继续调用 set_ducking(True)。
+        # If you've just landed and are still holding down the A button, the main loop will continue to be called set_ducking(True)。
         if self.on_ground and not self.ducking:
             self._apply_standing_size()
 
     def draw(self, screen):
-        """根据状态绘制站立或下蹲图片。"""
+        """Draw a picture of a person standing or squatting based on the given pose."""
         screen.blit(self.image, self.rect)
 
 
 class Bullet:
-    """玩家发射的子弹：水平向右移动的小矩形。"""
+    """Player-fired bullets: small rectangles moving horizontally to the right."""
 
     WIDTH = 14
     HEIGHT = 6
@@ -196,21 +196,21 @@ class Bullet:
 
 
 class Obstacle:
-    """障碍物基类：负责共用的移动和绘制逻辑。"""
+    """Obstacle Base Class: Responsible for shared movement and rendering logic."""
 
     def __init__(self, kind, speed):
         self.kind = kind
         self.speed = speed
 
     def setup_collision(self):
-        """根据当前 image 生成 rect 和像素遮罩。"""
+        """Generate a rect and a pixel mask based on the current image."""
         self.mask = pygame.mask.from_surface(self.image)
         self.rect = self.image.get_rect()
         self.rect.left = SCREEN_WIDTH + random.randint(20, 80)
         self.place_vertically()
 
     def place_vertically(self):
-        """由具体障碍物子类决定自己的 Y 轴位置。"""
+        """Each specific obstacle subclass determines its own Y-axis position."""
         raise NotImplementedError
 
     def update(self):
@@ -225,7 +225,7 @@ class Obstacle:
 
 
 class Cactus(Obstacle):
-    """地面仙人掌：只能跳过，子弹会直接穿透。"""
+    """Ground cacti: You can only jump over them; bullets will pass right through them."""
 
     def __init__(self, speed):
         super().__init__("cactus", speed)
@@ -238,7 +238,7 @@ class Cactus(Obstacle):
 
 
 class Bird(Obstacle):
-    """半空飞鸟：可下蹲躲避，也可被子弹击毁。"""
+    """Flying Birds: You can crouch to dodge them, or they can be destroyed by bullets."""
 
     def __init__(self, speed):
         super().__init__("bird", speed)
@@ -247,12 +247,12 @@ class Bird(Obstacle):
         self.setup_collision()
 
     def place_vertically(self):
-        # 修复射击高度 BUG：飞鸟中心线与玩家站立射击时的子弹中心线完全一致。
+        # Fixed a bug related to bullet trajectory: The centerline of the bird's flight path now perfectly aligns with the centerline of the bullet when the player is standing and firing.
         self.rect.centery = BULLET_CENTER_Y
 
 
 class FighterJet(Obstacle):
-    """半空战斗机：不可摧毁，子弹命中后只有子弹消失。"""
+    """Mid-air fighter: Indestructible; when hit by a bullet, only the bullet disappears."""
 
     def __init__(self, speed):
         super().__init__("jet", speed)
@@ -261,12 +261,12 @@ class FighterJet(Obstacle):
         self.setup_collision()
 
     def place_vertically(self):
-        # 战斗机仍保持半空下蹲躲避高度。
+        # The fighter jet remains at a low altitude to evade detection.
         self.rect.bottom = HORIZON_Y - 50
 
 
 class Game:
-    """游戏总控：初始化、输入、更新、碰撞、计分和渲染。"""
+    """Game Controller: Initialization, Input, Update, Collision, Scoring, and Rendering."""
 
     def __init__(self):
         pygame.init()
@@ -288,29 +288,29 @@ class Game:
         self.next_spawn_ticks = 0
         self.obstacle_speed = OBSTACLE_SPEED_START
 
-        # 题目要求必须使用 pygame.joystick 初始化 Xbox 手柄。
-        # 这里保存第一个检测到的手柄；若没插手柄，游戏仍显示提示并允许键盘测试。
+        
+        # This stores the first detected controller; if no controller is connected, the game will still display a prompt and allow for keyboard testing.
         self.joystick = None
         self._init_joystick()
 
-        # 关键修复：
-        # ViGEmBus / vgamepad 场景下，虚拟手柄可能反复触发设备添加/移除事件。
-        # 游戏运行中绝对不要响应这些事件重新初始化 joystick，否则会造成硬件轮询风暴。
-        # 因此在主循环开始前屏蔽热插拔事件，只保留普通按键事件和每帧按钮状态读取。
+        
+        # In ViGEmBus / vgamepad scenarios, the virtual gamepad may repeatedly trigger device add/remove events.
+        # Never respond to these events to reinitialize the joystick while the game is running, as this will cause a hardware polling storm.
+        # Therefore, suppress hot-plug events before the main loop begins, retaining only standard button events and per-frame button state reads.
         pygame.event.set_blocked([pygame.JOYDEVICEADDED, pygame.JOYDEVICEREMOVED])
         self.reset()
 
     def _init_joystick(self):
-        """初始化第一个可用手柄。"""
+        """Initialize the first available controller."""
         if pygame.joystick.get_count() > 0:
             self.joystick = pygame.joystick.Joystick(0)
             self.joystick.init()
-            print(f"已连接手柄：{self.joystick.get_name()}")
+            print(f"Controller connected：{self.joystick.get_name()}")
         else:
-            print("未检测到手柄。请连接 Xbox 手柄；也可用键盘 A/Y/B 测试。")
+            print("No controller detected. Please connect an Xbox controller; you can also use the A/Y/B keys on your keyboard to test.")
 
     def reset(self):
-        """重置一局游戏。"""
+        """Restart the game."""
         self.player.reset()
         self.bullets.clear()
         self.obstacles.clear()
@@ -322,13 +322,13 @@ class Game:
         self._schedule_next_obstacle()
 
     def _schedule_next_obstacle(self):
-        """随机安排下一次障碍物生成时间，让节奏更自然。"""
+        """Randomize the timing of the next obstacle to create a more natural rhythm."""
         now = pygame.time.get_ticks()
         delay = random.randint(OBSTACLE_SPAWN_MIN_MS, OBSTACLE_SPAWN_MAX_MS)
         self.next_spawn_ticks = now + delay
 
     def shoot(self):
-        """发射子弹，并使用冷却时间防止 Button 1 连发过快。"""
+        """Fire a bullet, and use the cooldown to prevent Button 1 from firing too rapidly."""
         now = pygame.time.get_ticks()
         if now - self.last_shot_ticks < SHOOT_COOLDOWN_MS:
             return
@@ -339,7 +339,7 @@ class Game:
         self.last_shot_ticks = now
 
     def spawn_obstacle(self):
-        """按权重生成三种障碍。"""
+        """Generate three types of obstacles based on their weights."""
         kind = random.choices(
             ["cactus", "bird", "jet"],
             weights=[0.48, 0.32, 0.20],
@@ -354,7 +354,7 @@ class Game:
         self._schedule_next_obstacle()
 
     def handle_events(self):
-        """处理退出、手柄按键和键盘测试输入。"""
+        """Handle exit, controller button, and keyboard test inputs."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
@@ -507,13 +507,13 @@ class Game:
         pygame.display.flip()
 
     def _draw_score(self):
-        """在右上角显示分数。"""
+        """Display the score in the upper-right corner."""
         text = self.font.render(f"Score: {self.score}", True, BLACK)
         rect = text.get_rect(topright=(SCREEN_WIDTH - 18, 14))
         self.screen.blit(text, rect)
 
     def _draw_controller_hint(self):
-        """在左上角显示当前手柄状态，方便确认 pygame.joystick 已工作。"""
+        """Displays the current joystick status in the top-left corner, making it easy to verify that pygame.joystick is working."""
         if self.joystick is not None and self.joystick.get_init():
             hint = f"Controller: {self.joystick.get_name()}"
             color = GRAY
@@ -525,7 +525,7 @@ class Game:
         self.screen.blit(text, (14, 14))
 
     def _draw_game_over(self):
-        """绘制 Game Over 蒙层和重置提示。"""
+        """Draw the “Game Over” overlay and the reset prompt."""
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
         overlay.fill((255, 255, 255, 190))
         self.screen.blit(overlay, (0, 0))
@@ -539,7 +539,7 @@ class Game:
         self.screen.blit(prompt, prompt_rect)
 
     def run(self):
-        """主循环：输入 -> 更新 -> 绘制 -> 控制帧率。"""
+        """Main loop: Input -> Update -> Render -> Control frame rate."""
         while True:
             self.clock.tick(FPS)
             self.handle_events()
@@ -548,7 +548,7 @@ class Game:
 
 
 def main():
-    """程序入口。"""
+    """Program entry."""
     game = Game()
     game.run()
 
