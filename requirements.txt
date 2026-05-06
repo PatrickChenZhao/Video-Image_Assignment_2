@@ -4,7 +4,7 @@
 # This file intentionally pins conservative versions to avoid dependency
 # conflicts on another computer, especially around NumPy 2.x / Pandas 3.x.
 
-numpy
+numpy<2.0.0
 pandas
 scipy
 scikit-learn
@@ -15,5 +15,5 @@ opencv-contrib-python
 mediapipe
 protobuf
 
-pynput
+vgamepad
 psutil

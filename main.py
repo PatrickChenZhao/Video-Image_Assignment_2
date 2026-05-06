@@ -1,12 +1,12 @@
 """
-Phase 3: 基于静态手势识别的实时游戏键盘控制器
+Phase 3: 基于静态手势识别的实时游戏手柄控制器
 
-运行方式：
+运行方式:
     python main.py
 
-新增日志：
-    1. latency_log.csv: 每一帧记录 [timestamp, svm_ms, knn_ms]。
-    2. resource_log.csv: 每秒记录当前 Python 进程 CPU 占用和内存消耗。
+日志:
+    1. latency_log.csv: 每一帧记录 [timestamp, svm_ms, knn_ms]
+    2. resource_log.csv: 每秒记录当前 Python 进程 CPU 占用和内存消耗
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import joblib
 import mediapipe as mp
 import numpy as np
 import psutil
-from pynput.keyboard import Controller, Key
+import vgamepad as vg
 
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
@@ -36,31 +36,33 @@ mp_drawing_styles = mp.solutions.drawing_styles
 # 防抖帧数：只有连续 N 帧预测结果一致，才确认手势有效
 DEBOUNCE_FRAMES = 3
 
-# 置信度阈值：只有最佳模型预测概率达到该值，才允许触发按键
-# 如果某个手势总是能识别但不触发，可先调低到 0.50~0.70 之间排查。
-CONFIDENCE_THRESHOLD = 0.60
+# 置信度阈值：只有最佳模型预测概率达到该值，才允许触发手柄按键
+CONFIDENCE_THRESHOLD = 0.80
 
 # 连续未检测到手部的帧数达到该值后，释放所有游戏按键
 NO_HAND_RELEASE_FRAMES = 3
 
-# 手势到游戏动作和按键的映射
-KEY_MAPPING = {
+# 手势到游戏动作和 Xbox 360 手柄按钮的映射
+PAD_MAPPING = {
     "Rock": {
         "action": "SQUAT",
-        "key": Key.ctrl,
+        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
         "display": "Rock: SQUAT",
     },
     "Scissors": {
         "action": "SHOOT",
-        "key": "j",
+        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
         "display": "Scissors: SHOOT",
     },
     "Paper": {
         "action": "JUMP",
-        "key": Key.space,
+        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
         "display": "Paper: JUMP",
     },
 }
+
+# 在打开摄像头之前初始化虚拟 Xbox 360 手柄
+gamepad = vg.VX360Gamepad()
 
 # 摄像头编号，通常内置或默认摄像头为 0
 CAMERA_INDEX = 0
@@ -69,6 +71,9 @@ CAMERA_INDEX = 0
 MAX_NUM_HANDS = 1
 MIN_DETECTION_CONFIDENCE = 0.6
 MIN_TRACKING_CONFIDENCE = 0.6
+
+HAND_LANDMARK_STYLE = mp_drawing_styles.get_default_hand_landmarks_style()
+GREEN_HAND_CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
 
 
 # =========================
@@ -101,9 +106,9 @@ def load_runtime_objects():
     if missing_files:
         missing_text = "\n".join(str(file_path) for file_path in missing_files)
         raise FileNotFoundError(
-            "缺少运行所需文件：\n"
+            "缺少运行所需文件:\n"
             f"{missing_text}\n"
-            "请先重新运行 Phase 2：python train_model.py"
+            "请先重新运行 Phase 2: python train_model.py"
         )
 
     scaler = joblib.load(SCALER_PATH)
@@ -115,11 +120,10 @@ def load_runtime_objects():
 
 def extract_relative_features_from_landmarks(hand_landmarks) -> list[float]:
     """
-    从 MediaPipe 手部关键点中提取 60 维相对坐标特征。
+    从 MediaPipe 手部关键点中提取 60 维尺度归一化相对坐标特征。
 
-    注意：
-        这里必须与 Phase 1 保持完全一致：
-        以 Landmark 0 手腕点为坐标原点，计算其余 20 个点的相对 x、y、z。
+    以 Landmark 0 手腕点为坐标原点，并使用 Landmark 0 到 Landmark 9
+    的距离 base_distance 做尺度归一化，确保手离摄像头远近变化时特征稳定。
     """
     landmarks = hand_landmarks.landmark
     wrist = landmarks[0]
@@ -161,7 +165,7 @@ def predict_with_confidence(model, scaled_features) -> tuple[str, float]:
     if not hasattr(model, "predict_proba"):
         raise AttributeError(
             "当前 best_model.pkl 不支持 predict_proba()。"
-            "请重新运行 Phase 2：python train_model.py"
+            "请重新运行 Phase 2: python train_model.py"
         )
 
     probabilities = model.predict_proba(scaled_features)[0]
@@ -182,12 +186,12 @@ def predict_gesture_and_latency(
     """
     对当前帧进行手势预测，并记录 SVM/KNN 单独推理耗时。
 
-    返回：
+    返回:
         gesture: 最佳模型预测出的手势名称；未检测到手部时为 None
         confidence: 最佳模型预测置信度；未检测到手部时为 None
         has_hand: 当前帧是否检测到手部
-        svm_ms: SVM predict 耗时，未检测到手部时为 None
-        knn_ms: KNN predict 耗时，未检测到手部时为 None
+        svm_ms: SVM predict 耗时；未检测到手部时为 None
+        knn_ms: KNN predict 耗时；未检测到手部时为 None
     """
     image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     result = hands_detector.process(image_rgb)
@@ -200,8 +204,8 @@ def predict_gesture_and_latency(
             frame,
             hand_landmarks,
             mp.solutions.hands.HAND_CONNECTIONS,
-            mp_drawing_styles.get_default_hand_landmarks_style(),
-            mp_drawing_styles.get_default_hand_connections_style(),
+            HAND_LANDMARK_STYLE,
+            GREEN_HAND_CONNECTION_STYLE,
         )
 
     hand_landmarks = result.multi_hand_landmarks[0]
@@ -213,7 +217,6 @@ def predict_gesture_and_latency(
     _, svm_ms = time_model_prediction(svm_model, scaled_features)
     _, knn_ms = time_model_prediction(knn_model, scaled_features)
 
-    # 键盘控制逻辑只使用 Phase 2 选出的最佳模型，并读取概率作为置信度
     best_prediction, confidence = predict_with_confidence(best_model, scaled_features)
     return best_prediction, confidence, True, svm_ms, knn_ms
 
@@ -230,46 +233,56 @@ def get_stable_gesture(prediction_history: deque[str]) -> Optional[str]:
     return None
 
 
-def release_pressed_key(keyboard: Controller, pressed_key) -> None:
-    """释放当前已按下的按键。"""
-    if pressed_key is None:
+def release_pressed_button(pressed_button) -> None:
+    """释放当前已按下的手柄按钮，并立即发送 update。"""
+    if pressed_button is None:
         return
 
     try:
-        keyboard.release(pressed_key)
+        gamepad.release_button(button=pressed_button)
+        gamepad.update()
     except Exception as exc:
-        print(f"[警告] 释放按键失败：{pressed_key}，原因：{exc}")
+        print(f"[警告] 释放手柄按钮失败: {pressed_button}，原因: {exc}")
 
 
-def press_gesture_key(
-    keyboard: Controller,
+def press_gesture_button(
     gesture: str,
     current_gesture: Optional[str],
-    pressed_key,
+    pressed_button,
 ) -> tuple[Optional[str], object]:
     """
-    根据稳定手势按下对应按键。
+    根据稳定手势按下对应手柄按钮。
 
-    如果手势发生切换，会先释放旧按键，再按下新按键。
+    如果手势发生切换，会先释放旧按钮并立即 update，再按下新按钮并立即 update。
     """
-    mapping = KEY_MAPPING.get(gesture)
+    mapping = PAD_MAPPING.get(gesture)
     if mapping is None:
-        release_pressed_key(keyboard, pressed_key)
+        release_pressed_button(pressed_button)
         return None, None
 
-    target_key = mapping["key"]
+    target_button = mapping["button"]
 
-    if gesture == current_gesture and pressed_key == target_key:
-        return current_gesture, pressed_key
+    if gesture == current_gesture and pressed_button == target_button:
+        return current_gesture, pressed_button
 
-    release_pressed_key(keyboard, pressed_key)
+    release_pressed_button(pressed_button)
 
     try:
-        keyboard.press(target_key)
-        return gesture, target_key
+        gamepad.press_button(button=target_button)
+        gamepad.update()
+        return gesture, target_button
     except Exception as exc:
-        print(f"[警告] 按下按键失败：{target_key}，原因：{exc}")
+        print(f"[警告] 按下手柄按钮失败: {target_button}，原因: {exc}")
         return None, None
+
+
+def reset_gamepad() -> None:
+    """重置虚拟手柄状态，并立即发送 update。"""
+    try:
+        gamepad.reset()
+        gamepad.update()
+    except Exception as exc:
+        print(f"[警告] 重置手柄失败，原因: {exc}")
 
 
 def draw_status(
@@ -280,14 +293,14 @@ def draw_status(
     has_hand: bool,
 ) -> None:
     """在画面上绘制当前预测状态。"""
-    if stable_gesture in KEY_MAPPING:
+    if stable_gesture in PAD_MAPPING:
         confidence_text = "" if confidence is None else f" ({confidence * 100:.1f}%)"
-        status_text = f"{KEY_MAPPING[stable_gesture]['display']}{confidence_text}"
+        status_text = f"{PAD_MAPPING[stable_gesture]['display']}{confidence_text}"
         color = (0, 255, 0)
-    elif raw_gesture in KEY_MAPPING and confidence is not None and confidence < CONFIDENCE_THRESHOLD:
+    elif raw_gesture in PAD_MAPPING and confidence is not None and confidence < CONFIDENCE_THRESHOLD:
         status_text = f"Low Confidence: {raw_gesture} ({confidence * 100:.1f}%)"
         color = (0, 165, 255)
-    elif raw_gesture in KEY_MAPPING:
+    elif raw_gesture in PAD_MAPPING:
         confidence_text = "" if confidence is None else f" ({confidence * 100:.1f}%)"
         status_text = f"Detecting: {raw_gesture}{confidence_text}"
         color = (0, 255, 255)
@@ -321,15 +334,14 @@ def write_resource_row(writer, process: psutil.Process, timestamp: str) -> None:
 
 
 def main() -> None:
-    """实时推理与键盘控制主程序入口。"""
+    """实时推理与虚拟手柄控制主程序入口。"""
     scaler, best_model, svm_model, knn_model = load_runtime_objects()
-    keyboard = Controller()
     process = psutil.Process()
     process.cpu_percent(interval=None)
 
     prediction_history: deque[str] = deque(maxlen=DEBOUNCE_FRAMES)
     current_gesture: Optional[str] = None
-    pressed_key = None
+    pressed_button = None
     no_hand_frames = 0
     last_resource_log_time = 0.0
 
@@ -337,11 +349,11 @@ def main() -> None:
     cap = cv2.VideoCapture(CAMERA_INDEX)
 
     if not cap.isOpened():
-        raise RuntimeError(f"无法打开摄像头，摄像头编号：{CAMERA_INDEX}")
+        raise RuntimeError(f"无法打开摄像头，摄像头编号: {CAMERA_INDEX}")
 
-    print("Phase 3 实时控制已启动。按 q 退出程序。")
-    print(f"逐帧延迟日志：{LATENCY_LOG_PATH}")
-    print(f"资源占用日志：{RESOURCE_LOG_PATH}")
+    print("Phase 3 实时手柄控制已启动。按 q 退出程序。")
+    print(f"逐帧延迟日志: {LATENCY_LOG_PATH}")
+    print(f"资源占用日志: {RESOURCE_LOG_PATH}")
 
     try:
         with LATENCY_LOG_PATH.open("w", newline="", encoding="utf-8") as latency_file, RESOURCE_LOG_PATH.open(
@@ -378,7 +390,7 @@ def main() -> None:
                         knn_model=knn_model,
                     )
                 except Exception as exc:
-                    print(f"[警告] 当前帧预测失败：{exc}")
+                    print(f"[警告] 当前帧预测失败: {exc}")
                     raw_gesture, confidence, has_hand, svm_ms, knn_ms = None, None, False, None, None
 
                 write_latency_row(latency_writer, timestamp, svm_ms, knn_ms)
@@ -394,7 +406,7 @@ def main() -> None:
 
                 is_confident = (
                     has_hand
-                    and raw_gesture in KEY_MAPPING
+                    and raw_gesture in PAD_MAPPING
                     and confidence is not None
                     and confidence >= CONFIDENCE_THRESHOLD
                 )
@@ -405,26 +417,25 @@ def main() -> None:
                     stable_gesture = get_stable_gesture(prediction_history)
 
                     if stable_gesture is not None:
-                        current_gesture, pressed_key = press_gesture_key(
-                            keyboard=keyboard,
+                        current_gesture, pressed_button = press_gesture_button(
                             gesture=stable_gesture,
                             current_gesture=current_gesture,
-                            pressed_key=pressed_key,
+                            pressed_button=pressed_button,
                         )
                 elif has_hand:
                     prediction_history.clear()
                     no_hand_frames = 0
-                    release_pressed_key(keyboard, pressed_key)
+                    release_pressed_button(pressed_button)
                     current_gesture = None
-                    pressed_key = None
+                    pressed_button = None
                 else:
                     prediction_history.clear()
                     no_hand_frames += 1
 
                     if no_hand_frames >= NO_HAND_RELEASE_FRAMES:
-                        release_pressed_key(keyboard, pressed_key)
+                        release_pressed_button(pressed_button)
                         current_gesture = None
-                        pressed_key = None
+                        pressed_button = None
 
                 draw_status(frame, raw_gesture, confidence, stable_gesture, has_hand)
                 cv2.imshow("Static Gesture Game Controller", frame)
@@ -435,10 +446,11 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n收到 Ctrl+C，准备退出程序。")
     finally:
-        release_pressed_key(keyboard, pressed_key)
+        release_pressed_button(pressed_button)
+        reset_gamepad()
         cap.release()
         cv2.destroyAllWindows()
-        print("已释放摄像头、窗口和所有游戏按键。")
+        print("已释放摄像头、窗口和所有虚拟手柄按键。")
 
 
 if __name__ == "__main__":
