@@ -28,6 +28,8 @@ SCALER_PATH = ROOT_DIR / "scaler.pkl"
 BEST_MODEL_PATH = ROOT_DIR / "best_model.pkl"
 SVM_MODEL_PATH = ROOT_DIR / "svm_model.pkl"
 KNN_MODEL_PATH = ROOT_DIR / "knn_model.pkl"
+METRICS_COMPARISON_CSV = ROOT_DIR / "model_metrics_comparison.csv"
+CONFUSION_MATRIX_CSV = ROOT_DIR / "confusion_matrix_comparison.csv"
 
 RANDOM_STATE = 42
 LABEL_COLUMN = "label"
@@ -96,11 +98,20 @@ def evaluate_model(
     X_test,
     y_test,
     labels: list[str],
-) -> float:
+) -> tuple[float, list[dict[str, object]], list[dict[str, object]]]:
     """Evaluate a model with accuracy, confusion matrix, and class metrics."""
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
     matrix = confusion_matrix(y_test, y_pred, labels=labels)
+    report = classification_report(
+        y_test,
+        y_pred,
+        labels=labels,
+        target_names=labels,
+        digits=4,
+        zero_division=0,
+        output_dict=True,
+    )
 
     print(f"\n[{model_name}]")
     print(f"Accuracy: {accuracy:.4f}")
@@ -118,7 +129,55 @@ def evaluate_model(
         )
     )
 
-    return accuracy
+    metric_rows: list[dict[str, object]] = []
+    for label in labels:
+        metric_rows.append(
+            {
+                "model": model_name,
+                "label": label,
+                "precision": report[label]["precision"],
+                "recall": report[label]["recall"],
+                "f1_score": report[label]["f1-score"],
+                "support": report[label]["support"],
+                "accuracy": accuracy,
+            }
+        )
+
+    for aggregate_label in ["macro avg", "weighted avg"]:
+        metric_rows.append(
+            {
+                "model": model_name,
+                "label": aggregate_label,
+                "precision": report[aggregate_label]["precision"],
+                "recall": report[aggregate_label]["recall"],
+                "f1_score": report[aggregate_label]["f1-score"],
+                "support": report[aggregate_label]["support"],
+                "accuracy": accuracy,
+            }
+        )
+
+    confusion_rows: list[dict[str, object]] = []
+    for actual_index, actual_label in enumerate(labels):
+        for predicted_index, predicted_label in enumerate(labels):
+            confusion_rows.append(
+                {
+                    "model": model_name,
+                    "actual_label": actual_label,
+                    "predicted_label": predicted_label,
+                    "count": int(matrix[actual_index, predicted_index]),
+                }
+            )
+
+    return accuracy, metric_rows, confusion_rows
+
+
+def write_evaluation_csvs(
+    metric_rows: list[dict[str, object]],
+    confusion_rows: list[dict[str, object]],
+) -> None:
+    """Write visualizable CSV files for model metric and confusion-matrix comparison."""
+    pd.DataFrame(metric_rows).to_csv(METRICS_COMPARISON_CSV, index=False)
+    pd.DataFrame(confusion_rows).to_csv(CONFUSION_MATRIX_CSV, index=False)
 
 
 def main() -> None:
@@ -145,18 +204,23 @@ def main() -> None:
 
     trained_models = {}
     scores = {}
+    all_metric_rows: list[dict[str, object]] = []
+    all_confusion_rows: list[dict[str, object]] = []
 
     for model_name, model in models.items():
         print(f"\nTraining model: {model_name}")
         model.fit(X_train_scaled, y_train)
         trained_models[model_name] = model
-        scores[model_name] = evaluate_model(
+        accuracy, metric_rows, confusion_rows = evaluate_model(
             model_name=model_name,
             model=model,
             X_test=X_test_scaled,
             y_test=y_test,
             labels=EXPECTED_LABELS,
         )
+        scores[model_name] = accuracy
+        all_metric_rows.extend(metric_rows)
+        all_confusion_rows.extend(confusion_rows)
 
     best_model_name = max(scores, key=scores.get)
     best_model = trained_models[best_model_name]
@@ -166,6 +230,7 @@ def main() -> None:
     joblib.dump(trained_models["SVM_RBF"], SVM_MODEL_PATH)
     joblib.dump(trained_models["KNN_5"], KNN_MODEL_PATH)
     joblib.dump(scaler, SCALER_PATH)
+    write_evaluation_csvs(all_metric_rows, all_confusion_rows)
 
     print("\n" + "=" * 60)
     print("Phase 2 model training completed")
@@ -175,6 +240,8 @@ def main() -> None:
     print(f"SVM model saved: {SVM_MODEL_PATH}")
     print(f"KNN model saved: {KNN_MODEL_PATH}")
     print(f"Scaler saved: {SCALER_PATH}")
+    print(f"Metrics comparison CSV saved: {METRICS_COMPARISON_CSV}")
+    print(f"Confusion matrix CSV saved: {CONFUSION_MATRIX_CSV}")
     print("=" * 60)
 
 

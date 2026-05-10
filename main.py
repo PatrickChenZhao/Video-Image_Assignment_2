@@ -43,6 +43,14 @@ CALIBRATION_FRAMES = 90
 SAVJ_DEAD_ZONE_PIXELS = 10
 SAVJ_R_MAX_PIXELS = 150
 XINPUT_AXIS_MAX = 32767
+OPPOSITE_CAMERA_HAND_SWAP = True
+
+if OPPOSITE_CAMERA_HAND_SWAP:
+    CONTROL_LEFT_SHOULDER_LANDMARK = 12
+    CONTROL_LEFT_WRIST_LANDMARK = 16
+else:
+    CONTROL_LEFT_SHOULDER_LANDMARK = 11
+    CONTROL_LEFT_WRIST_LANDMARK = 15
 
 PAD_MAPPING = {
     "Paper": {
@@ -71,7 +79,9 @@ MIN_TRACKING_CONFIDENCE = 0.6
 
 HAND_LANDMARK_STYLE = mp_drawing_styles.get_default_hand_landmarks_style()
 GREEN_HAND_CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
-POSE_LANDMARK_STYLE = mp_drawing_styles.get_default_pose_landmarks_style()
+SAVJ_SHOULDER_COLOR = (255, 0, 0)
+SAVJ_WRIST_COLOR = (0, 0, 255)
+SAVJ_ARM_LINE_COLOR = (0, 255, 0)
 
 ROOT_DIR = Path(__file__).resolve().parent
 SCALER_PATH = ROOT_DIR / "scaler.pkl"
@@ -278,11 +288,12 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
 
 def map_delta_to_axis(delta: float) -> int:
     """Map a pixel delta to the XInput axis range with dead zone and square curve."""
-    if abs(delta) < SAVJ_DEAD_ZONE_PIXELS:
+    clamped_delta = clamp(delta, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
+    if abs(clamped_delta) < SAVJ_DEAD_ZONE_PIXELS:
         return 0
 
-    normalized = min(abs(delta), SAVJ_R_MAX_PIXELS) / SAVJ_R_MAX_PIXELS
-    axis_value = math.copysign((normalized**2) * XINPUT_AXIS_MAX, delta)
+    normalized = abs(clamped_delta) / SAVJ_R_MAX_PIXELS
+    axis_value = math.copysign((normalized**2) * XINPUT_AXIS_MAX, clamped_delta)
     return int(clamp(axis_value, -XINPUT_AXIS_MAX, XINPUT_AXIS_MAX))
 
 
@@ -299,13 +310,13 @@ def send_left_joystick(axis_x: int, axis_y: int) -> None:
 
 
 def extract_left_arm_vector(pose_landmarks, frame_width: int, frame_height: int) -> Optional[tuple[float, float]]:
-    """Return the left wrist minus left shoulder vector in pixel space."""
+    """Return the controller-left wrist minus shoulder vector in pixel space."""
     if pose_landmarks is None:
         return None
 
     landmarks = pose_landmarks.landmark
-    left_shoulder = landmarks[11]
-    left_wrist = landmarks[15]
+    left_shoulder = landmarks[CONTROL_LEFT_SHOULDER_LANDMARK]
+    left_wrist = landmarks[CONTROL_LEFT_WRIST_LANDMARK]
 
     shoulder_x = left_shoulder.x * frame_width
     shoulder_y = left_shoulder.y * frame_height
@@ -331,30 +342,61 @@ def update_savj(frame, pose_landmarks, savj_state: SavjState) -> tuple[int, int,
 
     delta_x = vector_x - float(savj_state.neutral_x)
     delta_y = vector_y - float(savj_state.neutral_y)
-    axis_x = map_delta_to_axis(delta_x)
-    axis_y = map_delta_to_axis(delta_y)
+    mapped_delta_x = clamp(delta_x, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
+    mapped_delta_y = clamp(-delta_y, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
+    axis_x = map_delta_to_axis(mapped_delta_x)
+    axis_y = map_delta_to_axis(mapped_delta_y)
     send_left_joystick(axis_x, axis_y)
     return axis_x, axis_y, True
 
 
-def draw_holistic_landmarks(frame, results) -> None:
-    """Draw pose and right-hand landmarks from MediaPipe Holistic output."""
-    if results.pose_landmarks:
-        mp_drawing.draw_landmarks(
-            frame,
-            results.pose_landmarks,
-            mp_holistic.POSE_CONNECTIONS,
-            landmark_drawing_spec=POSE_LANDMARK_STYLE,
-        )
+def get_savj_anchor_points(pose_landmarks, frame_width: int, frame_height: int) -> Optional[tuple[tuple[int, int], tuple[int, int]]]:
+    """Return controller-left shoulder and wrist points in pixel coordinates."""
+    if pose_landmarks is None:
+        return None
 
-    if results.right_hand_landmarks:
+    landmarks = pose_landmarks.landmark
+    shoulder = landmarks[CONTROL_LEFT_SHOULDER_LANDMARK]
+    wrist = landmarks[CONTROL_LEFT_WRIST_LANDMARK]
+    shoulder_point = (int(shoulder.x * frame_width), int(shoulder.y * frame_height))
+    wrist_point = (int(wrist.x * frame_width), int(wrist.y * frame_height))
+    return shoulder_point, wrist_point
+
+
+def draw_savj_visual(frame, pose_landmarks) -> None:
+    """Draw only the SAVJ shoulder point, wrist point, and arm vector line."""
+    frame_height, frame_width = frame.shape[:2]
+    anchor_points = get_savj_anchor_points(pose_landmarks, frame_width, frame_height)
+    if anchor_points is None:
+        return
+
+    shoulder_point, wrist_point = anchor_points
+    cv2.line(frame, shoulder_point, wrist_point, SAVJ_ARM_LINE_COLOR, 3, cv2.LINE_AA)
+    cv2.circle(frame, shoulder_point, 8, SAVJ_SHOULDER_COLOR, -1, cv2.LINE_AA)
+    cv2.circle(frame, wrist_point, 8, SAVJ_WRIST_COLOR, -1, cv2.LINE_AA)
+
+
+def draw_holistic_landmarks(frame, results) -> None:
+    """Draw pose and controller-right hand landmarks from MediaPipe Holistic output."""
+    draw_savj_visual(frame, results.pose_landmarks)
+
+    controller_right_hand_landmarks = get_controller_right_hand_landmarks(results)
+    if controller_right_hand_landmarks:
         mp_drawing.draw_landmarks(
             frame,
-            results.right_hand_landmarks,
+            controller_right_hand_landmarks,
             mp_holistic.HAND_CONNECTIONS,
             HAND_LANDMARK_STYLE,
             GREEN_HAND_CONNECTION_STYLE,
         )
+
+
+def get_controller_right_hand_landmarks(results):
+    """Return the physical right hand landmarks after opposite-camera hand swapping."""
+    if OPPOSITE_CAMERA_HAND_SWAP:
+        return results.left_hand_landmarks
+
+    return results.right_hand_landmarks
 
 
 def draw_status(
@@ -475,8 +517,9 @@ def main() -> None:
                     draw_holistic_landmarks(frame, results)
 
                     axis_x, axis_y, savj_ready = update_savj(frame, results.pose_landmarks, savj_state)
+                    controller_right_hand_landmarks = get_controller_right_hand_landmarks(results)
                     raw_gesture, confidence, has_right_hand, svm_ms, knn_ms = predict_right_hand_gesture_and_latency(
-                        right_hand_landmarks=results.right_hand_landmarks,
+                        right_hand_landmarks=controller_right_hand_landmarks,
                         scaler=scaler,
                         svm_model=svm_model,
                         knn_model=knn_model,
