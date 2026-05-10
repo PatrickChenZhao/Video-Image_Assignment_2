@@ -40,17 +40,13 @@ NO_HAND_RELEASE_FRAMES = 3
 
 # Left-arm shoulder-anchored virtual joystick settings.
 CALIBRATION_FRAMES = 90
-SAVJ_DEAD_ZONE_PIXELS = 10
+SAVJ_DEAD_ZONE_PIXELS = 40
 SAVJ_R_MAX_PIXELS = 150
+XINPUT_AXIS_MIN = -32768
 XINPUT_AXIS_MAX = 32767
 OPPOSITE_CAMERA_HAND_SWAP = True
-
-if OPPOSITE_CAMERA_HAND_SWAP:
-    CONTROL_LEFT_SHOULDER_LANDMARK = 12
-    CONTROL_LEFT_WRIST_LANDMARK = 16
-else:
-    CONTROL_LEFT_SHOULDER_LANDMARK = 11
-    CONTROL_LEFT_WRIST_LANDMARK = 15
+CONTROL_LEFT_SHOULDER_LANDMARK = 11
+CONTROL_LEFT_WRIST_LANDMARK = 15
 
 PAD_MAPPING = {
     "Paper": {
@@ -287,23 +283,17 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
 
 
 def map_delta_to_axis(delta: float) -> int:
-    """Map a pixel delta to the XInput axis range with dead zone and square curve."""
+    """Map a clamped pixel delta to the XInput axis range with a square curve."""
     clamped_delta = clamp(delta, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
-    if abs(clamped_delta) < SAVJ_DEAD_ZONE_PIXELS:
-        return 0
-
     normalized = abs(clamped_delta) / SAVJ_R_MAX_PIXELS
     axis_value = math.copysign((normalized**2) * XINPUT_AXIS_MAX, clamped_delta)
-    return int(clamp(axis_value, -XINPUT_AXIS_MAX, XINPUT_AXIS_MAX))
+    return int(clamp(axis_value, XINPUT_AXIS_MIN, XINPUT_AXIS_MAX))
 
 
 def send_left_joystick(axis_x: int, axis_y: int) -> None:
     """Send the left-stick axis values through vgamepad."""
     try:
-        gamepad.left_joystick_float(
-            x_value_float=axis_x / XINPUT_AXIS_MAX,
-            y_value_float=axis_y / XINPUT_AXIS_MAX,
-        )
+        gamepad.left_joystick(x_value=axis_x, y_value=axis_y)
         gamepad.update()
     except Exception as exc:
         print(f"[Warning] Failed to update left joystick: {exc}")
@@ -342,10 +332,17 @@ def update_savj(frame, pose_landmarks, savj_state: SavjState) -> tuple[int, int,
 
     delta_x = vector_x - float(savj_state.neutral_x)
     delta_y = vector_y - float(savj_state.neutral_y)
-    mapped_delta_x = clamp(delta_x, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
-    mapped_delta_y = clamp(-delta_y, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
-    axis_x = map_delta_to_axis(mapped_delta_x)
-    axis_y = map_delta_to_axis(mapped_delta_y)
+    mapped_delta_y = -delta_y
+    distance = math.hypot(delta_x, mapped_delta_y)
+    if distance < SAVJ_DEAD_ZONE_PIXELS:
+        axis_x = 0
+        axis_y = 0
+    else:
+        clamped_delta_x = clamp(delta_x, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
+        clamped_delta_y = clamp(mapped_delta_y, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
+        axis_x = map_delta_to_axis(clamped_delta_x)
+        axis_y = map_delta_to_axis(clamped_delta_y)
+
     send_left_joystick(axis_x, axis_y)
     return axis_x, axis_y, True
 
