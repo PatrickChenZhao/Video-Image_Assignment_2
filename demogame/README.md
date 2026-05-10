@@ -1,33 +1,33 @@
 # Xbox Dino Shooter
 
-一个使用 Python 和 pygame 制作的 Xbox 手柄横版跑酷射击小游戏。
+A side-scrolling run-and-gun shooter game featuring an Xbox controller, built using Python and pygame.
 
-## 运行环境
+## Runtime Environment
 
 - Python 3.10+
 - pygame
 
-## 安装依赖
+## Install dependencies
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-## 启动游戏
+## Start game
 
 ```powershell
 python dino_game.py
 ```
 
-## Xbox 手柄按键
+## Xbox Button
 
-- A / Button 0：按住下蹲
-- Y / Button 3：跳跃
-- B / Button 1：射击
+- A / Button 0: Hold to crouch
+- Y / Button 3: Jump
+- B / Button 1: Shoot
 
-## 素材文件
+## Resource Files
 
-请确保以下图片和 `dino_game.py` 位于同一目录：
+Please ensure that the following images and `dino_game.py` are located in the same directory:
 
 - `robotman.png`
 - `cactus.png`
