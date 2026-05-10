@@ -15,7 +15,6 @@ import csv
 import math
 import time
 from collections import deque
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -39,10 +38,8 @@ CONFIDENCE_THRESHOLD = 0.80
 NO_HAND_RELEASE_FRAMES = 3
 
 # Left-arm shoulder-anchored virtual joystick settings.
-CALIBRATION_FRAMES = 90
 SAVJ_DEAD_ZONE_PIXELS = 40
 SAVJ_R_MAX_PIXELS = 150
-XINPUT_AXIS_MIN = -32768
 XINPUT_AXIS_MAX = 32767
 OPPOSITE_CAMERA_HAND_SWAP = True
 CONTROL_LEFT_SHOULDER_LANDMARK = 11
@@ -85,34 +82,6 @@ SVM_MODEL_PATH = ROOT_DIR / "svm_model.pkl"
 KNN_MODEL_PATH = ROOT_DIR / "knn_model.pkl"
 LATENCY_LOG_PATH = ROOT_DIR / "latency_log.csv"
 RESOURCE_LOG_PATH = ROOT_DIR / "resource_log.csv"
-
-
-@dataclass
-class SavjState:
-    """Calibration state for the shoulder-anchored virtual joystick."""
-
-    sample_count: int = 0
-    sum_x: float = 0.0
-    sum_y: float = 0.0
-    neutral_x: Optional[float] = None
-    neutral_y: Optional[float] = None
-
-    @property
-    def is_calibrated(self) -> bool:
-        return self.neutral_x is not None and self.neutral_y is not None
-
-    def add_sample(self, vector_x: float, vector_y: float) -> None:
-        if self.is_calibrated:
-            return
-
-        self.sample_count += 1
-        self.sum_x += vector_x
-        self.sum_y += vector_y
-
-        if self.sample_count >= CALIBRATION_FRAMES:
-            self.neutral_x = self.sum_x / self.sample_count
-            self.neutral_y = self.sum_y / self.sample_count
-            print(f"SAVJ neutral vector calibrated: ({self.neutral_x:.2f}, {self.neutral_y:.2f})")
 
 
 def current_timestamp() -> str:
@@ -282,12 +251,11 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-def map_delta_to_axis(delta: float) -> int:
-    """Map a clamped pixel delta to the XInput axis range with a square curve."""
-    clamped_delta = clamp(delta, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
-    normalized = abs(clamped_delta) / SAVJ_R_MAX_PIXELS
-    axis_value = math.copysign((normalized**2) * XINPUT_AXIS_MAX, clamped_delta)
-    return int(clamp(axis_value, XINPUT_AXIS_MIN, XINPUT_AXIS_MAX))
+def map_relative_position_to_axis(relative_position: float) -> int:
+    """Map a clipped shoulder-relative pixel position to the XInput axis range."""
+    clipped_position = clamp(relative_position, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
+    axis_value = int((clipped_position / SAVJ_R_MAX_PIXELS) * XINPUT_AXIS_MAX)
+    return int(clamp(axis_value, -XINPUT_AXIS_MAX, XINPUT_AXIS_MAX))
 
 
 def send_left_joystick(axis_x: int, axis_y: int) -> None:
@@ -299,64 +267,59 @@ def send_left_joystick(axis_x: int, axis_y: int) -> None:
         print(f"[Warning] Failed to update left joystick: {exc}")
 
 
-def extract_left_arm_vector(pose_landmarks, frame_width: int, frame_height: int) -> Optional[tuple[float, float]]:
-    """Return the controller-left wrist minus shoulder vector in pixel space."""
+def get_left_shoulder_wrist_pixels(
+    pose_landmarks,
+    frame_width: int,
+    frame_height: int,
+) -> Optional[tuple[tuple[float, float], tuple[float, float]]]:
+    """Return left shoulder and left wrist pixel coordinates."""
     if pose_landmarks is None:
         return None
 
     landmarks = pose_landmarks.landmark
     left_shoulder = landmarks[CONTROL_LEFT_SHOULDER_LANDMARK]
     left_wrist = landmarks[CONTROL_LEFT_WRIST_LANDMARK]
-
     shoulder_x = left_shoulder.x * frame_width
     shoulder_y = left_shoulder.y * frame_height
     wrist_x = left_wrist.x * frame_width
     wrist_y = left_wrist.y * frame_height
-    return wrist_x - shoulder_x, wrist_y - shoulder_y
+    return (shoulder_x, shoulder_y), (wrist_x, wrist_y)
 
 
-def update_savj(frame, pose_landmarks, savj_state: SavjState) -> tuple[int, int, bool]:
-    """Update SAVJ calibration or send the current left-stick position."""
+def update_savj(frame, pose_landmarks) -> tuple[int, int, bool]:
+    """Update the left stick from the real-time wrist position relative to the shoulder."""
     frame_height, frame_width = frame.shape[:2]
-    left_arm_vector = extract_left_arm_vector(pose_landmarks, frame_width, frame_height)
+    shoulder_wrist_pixels = get_left_shoulder_wrist_pixels(pose_landmarks, frame_width, frame_height)
 
-    if left_arm_vector is None:
-        send_left_joystick(0, 0)
-        return 0, 0, savj_state.is_calibrated
-
-    vector_x, vector_y = left_arm_vector
-    if not savj_state.is_calibrated:
-        savj_state.add_sample(vector_x, vector_y)
+    if shoulder_wrist_pixels is None:
         send_left_joystick(0, 0)
         return 0, 0, False
 
-    delta_x = vector_x - float(savj_state.neutral_x)
-    delta_y = vector_y - float(savj_state.neutral_y)
-    mapped_delta_y = -delta_y
-    distance = math.hypot(delta_x, mapped_delta_y)
-    if distance < SAVJ_DEAD_ZONE_PIXELS:
-        axis_x = 0
-        axis_y = 0
-    else:
-        clamped_delta_x = clamp(delta_x, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
-        clamped_delta_y = clamp(mapped_delta_y, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
-        axis_x = map_delta_to_axis(clamped_delta_x)
-        axis_y = map_delta_to_axis(clamped_delta_y)
+    (shoulder_x, shoulder_y), (wrist_x, wrist_y) = shoulder_wrist_pixels
+    rel_x = wrist_x - shoulder_x
+    rel_y = shoulder_y - wrist_y
+    distance = math.sqrt(rel_x**2 + rel_y**2)
 
-    send_left_joystick(axis_x, axis_y)
-    return axis_x, axis_y, True
+    if distance < SAVJ_DEAD_ZONE_PIXELS:
+        joy_x = 0
+        joy_y = 0
+    else:
+        joy_x = map_relative_position_to_axis(rel_x)
+        joy_y = map_relative_position_to_axis(rel_y)
+
+    send_left_joystick(joy_x, joy_y)
+    return joy_x, joy_y, True
 
 
 def get_savj_anchor_points(pose_landmarks, frame_width: int, frame_height: int) -> Optional[tuple[tuple[int, int], tuple[int, int]]]:
     """Return controller-left shoulder and wrist points in pixel coordinates."""
-    if pose_landmarks is None:
+    shoulder_wrist_pixels = get_left_shoulder_wrist_pixels(pose_landmarks, frame_width, frame_height)
+    if shoulder_wrist_pixels is None:
         return None
 
-    landmarks = pose_landmarks.landmark
-    shoulder = landmarks[CONTROL_LEFT_SHOULDER_LANDMARK]
-    wrist = landmarks[CONTROL_LEFT_WRIST_LANDMARK]
-    shoulder_point = (int(shoulder.x * frame_width), int(shoulder.y * frame_height))
-    wrist_point = (int(wrist.x * frame_width), int(wrist.y * frame_height))
+    (shoulder_x, shoulder_y), (wrist_x, wrist_y) = shoulder_wrist_pixels
+    shoulder_point = (int(shoulder_x), int(shoulder_y))
+    wrist_point = (int(wrist_x), int(wrist_y))
     return shoulder_point, wrist_point
 
 
@@ -404,8 +367,7 @@ def draw_status(
     has_right_hand: bool,
     axis_x: int,
     axis_y: int,
-    savj_state: SavjState,
-    savj_ready: bool,
+    has_left_arm: bool,
 ) -> None:
     """Draw runtime status text on the camera frame."""
     if stable_gesture in PAD_MAPPING:
@@ -426,11 +388,8 @@ def draw_status(
         status_text = "Right: Unknown"
         color = (0, 0, 255)
 
-    if not savj_state.is_calibrated:
-        left_text = f"Calibrating Left Arm... {savj_state.sample_count}/{CALIBRATION_FRAMES}"
-        left_color = (0, 165, 255)
-    elif savj_ready:
-        left_text = f"Left Stick: X={axis_x} Y={axis_y}"
+    if has_left_arm:
+        left_text = f"Left Stick: joy_x={axis_x} joy_y={axis_y}"
         left_color = (0, 255, 0)
     else:
         left_text = "Left Stick: No Pose"
@@ -470,7 +429,6 @@ def main() -> None:
     pressed_button = None
     no_hand_frames = 0
     last_resource_log_time = 0.0
-    savj_state = SavjState()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
@@ -513,7 +471,7 @@ def main() -> None:
                     results = holistic_detector.process(image_rgb)
                     draw_holistic_landmarks(frame, results)
 
-                    axis_x, axis_y, savj_ready = update_savj(frame, results.pose_landmarks, savj_state)
+                    axis_x, axis_y, has_left_arm = update_savj(frame, results.pose_landmarks)
                     controller_right_hand_landmarks = get_controller_right_hand_landmarks(results)
                     raw_gesture, confidence, has_right_hand, svm_ms, knn_ms = predict_right_hand_gesture_and_latency(
                         right_hand_landmarks=controller_right_hand_landmarks,
@@ -523,7 +481,7 @@ def main() -> None:
                     )
                 except Exception as exc:
                     print(f"[Warning] Current frame prediction failed: {exc}")
-                    axis_x, axis_y, savj_ready = 0, 0, savj_state.is_calibrated
+                    axis_x, axis_y, has_left_arm = 0, 0, False
                     raw_gesture, confidence, has_right_hand, svm_ms, knn_ms = None, None, False, None, None
 
                 write_latency_row(latency_writer, timestamp, svm_ms, knn_ms)
@@ -574,8 +532,7 @@ def main() -> None:
                     has_right_hand=has_right_hand,
                     axis_x=axis_x,
                     axis_y=axis_y,
-                    savj_state=savj_state,
-                    savj_ready=savj_ready,
+                    has_left_arm=has_left_arm,
                 )
                 cv2.imshow("Dual-Hand Holistic Game Controller", frame)
 
