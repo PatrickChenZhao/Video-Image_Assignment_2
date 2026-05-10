@@ -1,14 +1,12 @@
 """
-Phase 1: 静态手势图片特征提取脚本
+Phase 1: static hand gesture feature extraction.
 
-运行方式：
+Run:
     python extract_features.py
 
-功能说明：
-    1. 遍历 gesture_data_sample/ 下的 rock、paper、scissors 三类图片。
-    2. 使用 MediaPipe Hands 检测单手 21 个关键点。
-    3. 以手腕点 Landmark 0 为坐标原点，提取其余 20 个点的相对 3D 坐标。
-    4. 将 60 维特征和标签写入根目录 gesture_dataset.csv。
+This script reads the gesture image folders, detects one hand with MediaPipe
+Hands, extracts 60 scale-normalized relative landmark features, and writes
+them to gesture_dataset.csv.
 """
 
 from __future__ import annotations
@@ -21,28 +19,22 @@ import cv2
 import mediapipe as mp
 
 
-# 项目根目录：本脚本所在目录
 ROOT_DIR = Path(__file__).resolve().parent
-
-# 数据集目录：用户说明中所有 dataset/ 均指向 gesture_data_sample/
 DATASET_DIR = ROOT_DIR / "gesture_data_sample"
-
-# 输出 CSV 文件路径
 OUTPUT_CSV = ROOT_DIR / "gesture_dataset.csv"
 
-# 只处理这三类有效手势文件夹，并统一输出为指定标签字符串
 GESTURE_LABELS = {
-    "rock": "Rock",
     "paper": "Paper",
     "scissors": "Scissors",
+    "rock": "Rock",
+    "thumb": "Thumb",
 }
 
-# 支持的图片格式
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def is_image_file(file_path: Path) -> bool:
-    """判断文件是否为支持的图片格式。"""
+    """Return True when the path points to a supported image file."""
     return file_path.is_file() and file_path.suffix.lower() in IMAGE_EXTENSIONS
 
 
@@ -51,30 +43,27 @@ def extract_relative_features(
     hands_detector: mp.solutions.hands.Hands,
 ) -> Optional[list[float]]:
     """
-    从单张图片中提取 60 维手部相对坐标特征。
+    Extract 60 relative hand-landmark features from a single image.
 
-    返回：
-        - list[float]：成功检测到手部时，返回 20 个关键点 * 3 维坐标。
-        - None：图片无法读取、无法检测到手部或处理异常时返回 None。
+    Landmark 0 is used as the origin, and the distance from Landmark 0 to
+    Landmark 9 is used as the scale reference.
     """
     image = cv2.imread(str(image_path))
     if image is None:
-        print(f"[跳过] 无法读取图片：{image_path}")
+        print(f"[Skip] Cannot read image: {image_path}")
         return None
 
     try:
-        # MediaPipe 需要 RGB 图像，OpenCV 默认读取为 BGR
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         result = hands_detector.process(image_rgb)
     except Exception as exc:
-        print(f"[跳过] 处理图片出错：{image_path}，原因：{exc}")
+        print(f"[Skip] Failed to process image: {image_path}. Reason: {exc}")
         return None
 
     if not result.multi_hand_landmarks:
-        print(f"[跳过] 未检测到手部：{image_path}")
+        print(f"[Skip] No hand detected: {image_path}")
         return None
 
-    # 只取检测到的第一只手，保证每张图片输出固定 60 维特征
     landmarks = result.multi_hand_landmarks[0].landmark
     wrist = landmarks[0]
     middle_finger_mcp = landmarks[9]
@@ -88,7 +77,6 @@ def extract_relative_features(
 
     features: list[float] = []
     for landmark in landmarks[1:]:
-        # 核心约束：以手腕点 Landmark 0 为原点，计算其余 20 个点的相对坐标
         features.extend(
             [
                 (landmark.x - wrist.x) / base_distance,
@@ -98,24 +86,20 @@ def extract_relative_features(
         )
 
     if len(features) != 60:
-        print(f"[跳过] 特征维度异常：{image_path}，当前维度：{len(features)}")
+        print(f"[Skip] Invalid feature length for {image_path}: {len(features)}")
         return None
 
     return features
 
 
 def iter_gesture_images() -> list[tuple[Path, str]]:
-    """
-    收集三类手势图片路径及其标签。
-
-    gesture_data_sample/ 中如果存在 none 或其他额外目录，会被自动忽略。
-    """
+    """Collect image paths from the four supported gesture folders."""
     image_items: list[tuple[Path, str]] = []
 
     for folder_name, label in GESTURE_LABELS.items():
         gesture_dir = DATASET_DIR / folder_name
         if not gesture_dir.exists():
-            print(f"[警告] 类别文件夹不存在，已跳过：{gesture_dir}")
+            print(f"[Warning] Gesture folder does not exist and was skipped: {gesture_dir}")
             continue
 
         for image_path in sorted(gesture_dir.rglob("*")):
@@ -126,7 +110,7 @@ def iter_gesture_images() -> list[tuple[Path, str]]:
 
 
 def write_dataset(rows: list[list[float | str]]) -> None:
-    """将提取结果写入 gesture_dataset.csv。"""
+    """Write extracted features to gesture_dataset.csv."""
     feature_columns = [f"feature_{index}" for index in range(1, 61)]
     header = feature_columns + ["label"]
 
@@ -137,13 +121,13 @@ def write_dataset(rows: list[list[float | str]]) -> None:
 
 
 def main() -> None:
-    """脚本入口。"""
+    """Run feature extraction for all supported gesture folders."""
     if not DATASET_DIR.exists():
-        raise FileNotFoundError(f"数据集目录不存在：{DATASET_DIR}")
+        raise FileNotFoundError(f"Dataset directory does not exist: {DATASET_DIR}")
 
     image_items = iter_gesture_images()
     if not image_items:
-        raise RuntimeError(f"未找到任何有效图片，请检查目录：{DATASET_DIR}")
+        raise RuntimeError(f"No valid images found under: {DATASET_DIR}")
 
     rows: list[list[float | str]] = []
     skipped_count = 0
@@ -163,16 +147,16 @@ def main() -> None:
             rows.append(features + [label])
 
     if not rows:
-        raise RuntimeError("所有图片均未成功提取特征，未生成有效数据集。")
+        raise RuntimeError("No valid feature rows were generated.")
 
     write_dataset(rows)
 
     print("=" * 60)
-    print("Phase 1 特征提取完成")
-    print(f"数据集目录：{DATASET_DIR}")
-    print(f"输出文件：{OUTPUT_CSV}")
-    print(f"成功样本数：{len(rows)}")
-    print(f"跳过图片数：{skipped_count}")
+    print("Phase 1 feature extraction completed")
+    print(f"Dataset directory: {DATASET_DIR}")
+    print(f"Output CSV: {OUTPUT_CSV}")
+    print(f"Successful samples: {len(rows)}")
+    print(f"Skipped images: {skipped_count}")
     print("=" * 60)
 
 

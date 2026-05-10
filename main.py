@@ -1,19 +1,21 @@
 """
-Phase 3: 基于静态手势识别的实时游戏手柄控制器
+Phase 3: dual-hand multimodal virtual Xbox controller.
 
-运行方式:
+Run:
     python main.py
 
-日志:
-    1. latency_log.csv: 每一帧记录 [timestamp, svm_ms, knn_ms]
-    2. resource_log.csv: 每秒记录当前 Python 进程 CPU 占用和内存消耗
+Logs:
+    1. latency_log.csv records per-frame SVM/KNN inference latency.
+    2. resource_log.csv records Python process CPU and memory usage once per second.
 """
 
 from __future__ import annotations
 
 import csv
+import math
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -25,105 +27,117 @@ import numpy as np
 import psutil
 import vgamepad as vg
 
+
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
+mp_holistic = mp.solutions.holistic
 
 
-# =========================
-# 可手动微调的全局常量
-# =========================
-
-# 防抖帧数：只有连续 N 帧预测结果一致，才确认手势有效
+# Right-hand SVM button recognition settings.
 DEBOUNCE_FRAMES = 3
-
-# 置信度阈值：只有最佳模型预测概率达到该值，才允许触发手柄按键
 CONFIDENCE_THRESHOLD = 0.80
-
-# 连续未检测到手部的帧数达到该值后，释放所有游戏按键
 NO_HAND_RELEASE_FRAMES = 3
 
-# 手势到游戏动作和 Xbox 360 手柄按钮的映射
+# Left-arm shoulder-anchored virtual joystick settings.
+CALIBRATION_FRAMES = 90
+SAVJ_DEAD_ZONE_PIXELS = 10
+SAVJ_R_MAX_PIXELS = 150
+XINPUT_AXIS_MAX = 32767
+
 PAD_MAPPING = {
-    "Rock": {
-        "action": "SQUAT",
+    "Paper": {
         "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
-        "display": "Rock: SQUAT",
+        "display": "Paper: A",
     },
     "Scissors": {
-        "action": "SHOOT",
-        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
-        "display": "Scissors: SHOOT",
+        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
+        "display": "Scissors: X",
     },
-    "Paper": {
-        "action": "JUMP",
-        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
-        "display": "Paper: JUMP",
+    "Thumb": {
+        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
+        "display": "Thumb: B",
+    },
+    "Rock": {
+        "button": None,
+        "display": "Rock: RELEASE",
     },
 }
 
-# 在打开摄像头之前初始化虚拟 Xbox 360 手柄
 gamepad = vg.VX360Gamepad()
 
-# 摄像头编号，通常内置或默认摄像头为 0
 CAMERA_INDEX = 0
-
-# MediaPipe 检测参数
-MAX_NUM_HANDS = 1
 MIN_DETECTION_CONFIDENCE = 0.6
 MIN_TRACKING_CONFIDENCE = 0.6
 
 HAND_LANDMARK_STYLE = mp_drawing_styles.get_default_hand_landmarks_style()
 GREEN_HAND_CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
-
-
-# =========================
-# 路径配置
-# =========================
+POSE_LANDMARK_STYLE = mp_drawing_styles.get_default_pose_landmarks_style()
 
 ROOT_DIR = Path(__file__).resolve().parent
 SCALER_PATH = ROOT_DIR / "scaler.pkl"
-BEST_MODEL_PATH = ROOT_DIR / "best_model.pkl"
 SVM_MODEL_PATH = ROOT_DIR / "svm_model.pkl"
 KNN_MODEL_PATH = ROOT_DIR / "knn_model.pkl"
 LATENCY_LOG_PATH = ROOT_DIR / "latency_log.csv"
 RESOURCE_LOG_PATH = ROOT_DIR / "resource_log.csv"
 
 
+@dataclass
+class SavjState:
+    """Calibration state for the shoulder-anchored virtual joystick."""
+
+    sample_count: int = 0
+    sum_x: float = 0.0
+    sum_y: float = 0.0
+    neutral_x: Optional[float] = None
+    neutral_y: Optional[float] = None
+
+    @property
+    def is_calibrated(self) -> bool:
+        return self.neutral_x is not None and self.neutral_y is not None
+
+    def add_sample(self, vector_x: float, vector_y: float) -> None:
+        if self.is_calibrated:
+            return
+
+        self.sample_count += 1
+        self.sum_x += vector_x
+        self.sum_y += vector_y
+
+        if self.sample_count >= CALIBRATION_FRAMES:
+            self.neutral_x = self.sum_x / self.sample_count
+            self.neutral_y = self.sum_y / self.sample_count
+            print(f"SAVJ neutral vector calibrated: ({self.neutral_x:.2f}, {self.neutral_y:.2f})")
+
+
 def current_timestamp() -> str:
-    """返回适合 CSV 记录的毫秒级时间戳。"""
+    """Return an ISO timestamp suitable for CSV logging."""
     return datetime.now().isoformat(timespec="milliseconds")
 
 
 def load_runtime_objects():
-    """加载 Phase 2 保存的 scaler、最佳模型、SVM 模型和 KNN 模型。"""
-    required_files = [
-        SCALER_PATH,
-        BEST_MODEL_PATH,
-        SVM_MODEL_PATH,
-        KNN_MODEL_PATH,
-    ]
+    """Load the scaler, SVM model, and KNN model saved by train_model.py."""
+    required_files = [SCALER_PATH, SVM_MODEL_PATH, KNN_MODEL_PATH]
     missing_files = [file_path for file_path in required_files if not file_path.exists()]
     if missing_files:
         missing_text = "\n".join(str(file_path) for file_path in missing_files)
         raise FileNotFoundError(
-            "缺少运行所需文件:\n"
+            "Missing runtime files:\n"
             f"{missing_text}\n"
-            "请先重新运行 Phase 2: python train_model.py"
+            "Run Phase 2 first: python train_model.py"
         )
 
     scaler = joblib.load(SCALER_PATH)
-    best_model = joblib.load(BEST_MODEL_PATH)
     svm_model = joblib.load(SVM_MODEL_PATH)
     knn_model = joblib.load(KNN_MODEL_PATH)
-    return scaler, best_model, svm_model, knn_model
+    return scaler, svm_model, knn_model
 
 
 def extract_relative_features_from_landmarks(hand_landmarks) -> list[float]:
     """
-    从 MediaPipe 手部关键点中提取 60 维尺度归一化相对坐标特征。
+    Extract 60 scale-normalized relative hand-landmark features.
 
-    以 Landmark 0 手腕点为坐标原点，并使用 Landmark 0 到 Landmark 9
-    的距离 base_distance 做尺度归一化，确保手离摄像头远近变化时特征稳定。
+    Landmark 0 is used as the origin, and the distance from Landmark 0 to
+    Landmark 9 is used as the scale reference.
     """
     landmarks = hand_landmarks.landmark
     wrist = landmarks[0]
@@ -147,13 +161,13 @@ def extract_relative_features_from_landmarks(hand_landmarks) -> list[float]:
         )
 
     if len(features) != 60:
-        raise ValueError(f"实时特征维度异常，应为 60，实际为 {len(features)}")
+        raise ValueError(f"Invalid runtime feature length. Expected 60, got {len(features)}")
 
     return features
 
 
 def time_model_prediction(model, scaled_features) -> tuple[str, float]:
-    """执行一次模型预测，并返回预测结果和耗时毫秒数。"""
+    """Run one prediction and return the prediction and elapsed milliseconds."""
     start_time = time.perf_counter()
     prediction = model.predict(scaled_features)[0]
     elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -161,11 +175,11 @@ def time_model_prediction(model, scaled_features) -> tuple[str, float]:
 
 
 def predict_with_confidence(model, scaled_features) -> tuple[str, float]:
-    """使用最佳模型预测手势，并返回最大类别概率作为置信度。"""
+    """Predict with the SVM model and return the highest class probability."""
     if not hasattr(model, "predict_proba"):
         raise AttributeError(
-            "当前 best_model.pkl 不支持 predict_proba()。"
-            "请重新运行 Phase 2: python train_model.py"
+            "svm_model.pkl does not support predict_proba(). "
+            "Run Phase 2 again: python train_model.py"
         )
 
     probabilities = model.predict_proba(scaled_features)[0]
@@ -175,54 +189,29 @@ def predict_with_confidence(model, scaled_features) -> tuple[str, float]:
     return prediction, confidence
 
 
-def predict_gesture_and_latency(
-    frame,
-    hands_detector,
+def predict_right_hand_gesture_and_latency(
+    right_hand_landmarks,
     scaler,
-    best_model,
     svm_model,
     knn_model,
 ) -> tuple[Optional[str], Optional[float], bool, Optional[float], Optional[float]]:
-    """
-    对当前帧进行手势预测，并记录 SVM/KNN 单独推理耗时。
-
-    返回:
-        gesture: 最佳模型预测出的手势名称；未检测到手部时为 None
-        confidence: 最佳模型预测置信度；未检测到手部时为 None
-        has_hand: 当前帧是否检测到手部
-        svm_ms: SVM predict 耗时；未检测到手部时为 None
-        knn_ms: KNN predict 耗时；未检测到手部时为 None
-    """
-    image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    result = hands_detector.process(image_rgb)
-
-    if not result.multi_hand_landmarks:
+    """Classify the right hand with SVM and measure SVM/KNN inference latency."""
+    if right_hand_landmarks is None:
         return None, None, False, None, None
 
-    for hand_landmarks in result.multi_hand_landmarks:
-        mp_drawing.draw_landmarks(
-            frame,
-            hand_landmarks,
-            mp.solutions.hands.HAND_CONNECTIONS,
-            HAND_LANDMARK_STYLE,
-            GREEN_HAND_CONNECTION_STYLE,
-        )
-
-    hand_landmarks = result.multi_hand_landmarks[0]
-    features = extract_relative_features_from_landmarks(hand_landmarks)
-
+    features = extract_relative_features_from_landmarks(right_hand_landmarks)
     feature_array = np.array(features, dtype=np.float32).reshape(1, -1)
     scaled_features = scaler.transform(feature_array)
 
     _, svm_ms = time_model_prediction(svm_model, scaled_features)
     _, knn_ms = time_model_prediction(knn_model, scaled_features)
 
-    best_prediction, confidence = predict_with_confidence(best_model, scaled_features)
-    return best_prediction, confidence, True, svm_ms, knn_ms
+    svm_prediction, confidence = predict_with_confidence(svm_model, scaled_features)
+    return svm_prediction, confidence, True, svm_ms, knn_ms
 
 
 def get_stable_gesture(prediction_history: deque[str]) -> Optional[str]:
-    """当历史队列已满且所有预测一致时，返回稳定手势。"""
+    """Return a gesture only when the debounce queue is full and unanimous."""
     if len(prediction_history) < DEBOUNCE_FRAMES:
         return None
 
@@ -234,7 +223,7 @@ def get_stable_gesture(prediction_history: deque[str]) -> Optional[str]:
 
 
 def release_pressed_button(pressed_button) -> None:
-    """释放当前已按下的手柄按钮，并立即发送 update。"""
+    """Release the currently held gamepad button and update the device."""
     if pressed_button is None:
         return
 
@@ -242,47 +231,130 @@ def release_pressed_button(pressed_button) -> None:
         gamepad.release_button(button=pressed_button)
         gamepad.update()
     except Exception as exc:
-        print(f"[警告] 释放手柄按钮失败: {pressed_button}，原因: {exc}")
+        print(f"[Warning] Failed to release gamepad button {pressed_button}: {exc}")
 
 
-def press_gesture_button(
+def apply_right_hand_state(
     gesture: str,
     current_gesture: Optional[str],
     pressed_button,
 ) -> tuple[Optional[str], object]:
-    """
-    根据稳定手势按下对应手柄按钮。
-
-    如果手势发生切换，会先释放旧按钮并立即 update，再按下新按钮并立即 update。
-    """
-    mapping = PAD_MAPPING.get(gesture)
-    if mapping is None:
-        release_pressed_button(pressed_button)
-        return None, None
-
-    target_button = mapping["button"]
-
-    if gesture == current_gesture and pressed_button == target_button:
+    """Apply a debounced right-hand gesture to the mapped Xbox button state."""
+    if gesture == current_gesture:
         return current_gesture, pressed_button
 
     release_pressed_button(pressed_button)
+
+    mapping = PAD_MAPPING.get(gesture)
+    if mapping is None:
+        return None, None
+
+    target_button = mapping["button"]
+    if target_button is None:
+        return gesture, None
 
     try:
         gamepad.press_button(button=target_button)
         gamepad.update()
         return gesture, target_button
     except Exception as exc:
-        print(f"[警告] 按下手柄按钮失败: {target_button}，原因: {exc}")
+        print(f"[Warning] Failed to press gamepad button {target_button}: {exc}")
         return None, None
 
 
 def reset_gamepad() -> None:
-    """重置虚拟手柄状态，并立即发送 update。"""
+    """Reset the virtual gamepad and update the device immediately."""
     try:
         gamepad.reset()
         gamepad.update()
     except Exception as exc:
-        print(f"[警告] 重置手柄失败，原因: {exc}")
+        print(f"[Warning] Failed to reset gamepad: {exc}")
+
+
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    """Clamp a float to a closed interval."""
+    return max(minimum, min(maximum, value))
+
+
+def map_delta_to_axis(delta: float) -> int:
+    """Map a pixel delta to the XInput axis range with dead zone and square curve."""
+    if abs(delta) < SAVJ_DEAD_ZONE_PIXELS:
+        return 0
+
+    normalized = min(abs(delta), SAVJ_R_MAX_PIXELS) / SAVJ_R_MAX_PIXELS
+    axis_value = math.copysign((normalized**2) * XINPUT_AXIS_MAX, delta)
+    return int(clamp(axis_value, -XINPUT_AXIS_MAX, XINPUT_AXIS_MAX))
+
+
+def send_left_joystick(axis_x: int, axis_y: int) -> None:
+    """Send the left-stick axis values through vgamepad."""
+    try:
+        gamepad.left_joystick_float(
+            x_value_float=axis_x / XINPUT_AXIS_MAX,
+            y_value_float=axis_y / XINPUT_AXIS_MAX,
+        )
+        gamepad.update()
+    except Exception as exc:
+        print(f"[Warning] Failed to update left joystick: {exc}")
+
+
+def extract_left_arm_vector(pose_landmarks, frame_width: int, frame_height: int) -> Optional[tuple[float, float]]:
+    """Return the left wrist minus left shoulder vector in pixel space."""
+    if pose_landmarks is None:
+        return None
+
+    landmarks = pose_landmarks.landmark
+    left_shoulder = landmarks[11]
+    left_wrist = landmarks[15]
+
+    shoulder_x = left_shoulder.x * frame_width
+    shoulder_y = left_shoulder.y * frame_height
+    wrist_x = left_wrist.x * frame_width
+    wrist_y = left_wrist.y * frame_height
+    return wrist_x - shoulder_x, wrist_y - shoulder_y
+
+
+def update_savj(frame, pose_landmarks, savj_state: SavjState) -> tuple[int, int, bool]:
+    """Update SAVJ calibration or send the current left-stick position."""
+    frame_height, frame_width = frame.shape[:2]
+    left_arm_vector = extract_left_arm_vector(pose_landmarks, frame_width, frame_height)
+
+    if left_arm_vector is None:
+        send_left_joystick(0, 0)
+        return 0, 0, savj_state.is_calibrated
+
+    vector_x, vector_y = left_arm_vector
+    if not savj_state.is_calibrated:
+        savj_state.add_sample(vector_x, vector_y)
+        send_left_joystick(0, 0)
+        return 0, 0, False
+
+    delta_x = vector_x - float(savj_state.neutral_x)
+    delta_y = vector_y - float(savj_state.neutral_y)
+    axis_x = map_delta_to_axis(delta_x)
+    axis_y = map_delta_to_axis(delta_y)
+    send_left_joystick(axis_x, axis_y)
+    return axis_x, axis_y, True
+
+
+def draw_holistic_landmarks(frame, results) -> None:
+    """Draw pose and right-hand landmarks from MediaPipe Holistic output."""
+    if results.pose_landmarks:
+        mp_drawing.draw_landmarks(
+            frame,
+            results.pose_landmarks,
+            mp_holistic.POSE_CONNECTIONS,
+            landmark_drawing_spec=POSE_LANDMARK_STYLE,
+        )
+
+    if results.right_hand_landmarks:
+        mp_drawing.draw_landmarks(
+            frame,
+            results.right_hand_landmarks,
+            mp_holistic.HAND_CONNECTIONS,
+            HAND_LANDMARK_STYLE,
+            GREEN_HAND_CONNECTION_STYLE,
+        )
 
 
 def draw_status(
@@ -290,33 +362,48 @@ def draw_status(
     raw_gesture: Optional[str],
     confidence: Optional[float],
     stable_gesture: Optional[str],
-    has_hand: bool,
+    has_right_hand: bool,
+    axis_x: int,
+    axis_y: int,
+    savj_state: SavjState,
+    savj_ready: bool,
 ) -> None:
-    """在画面上绘制当前预测状态。"""
+    """Draw runtime status text on the camera frame."""
     if stable_gesture in PAD_MAPPING:
         confidence_text = "" if confidence is None else f" ({confidence * 100:.1f}%)"
-        status_text = f"{PAD_MAPPING[stable_gesture]['display']}{confidence_text}"
+        status_text = f"Right: {PAD_MAPPING[stable_gesture]['display']}{confidence_text}"
         color = (0, 255, 0)
     elif raw_gesture in PAD_MAPPING and confidence is not None and confidence < CONFIDENCE_THRESHOLD:
-        status_text = f"Low Confidence: {raw_gesture} ({confidence * 100:.1f}%)"
+        status_text = f"Right: Low Confidence {raw_gesture} ({confidence * 100:.1f}%)"
         color = (0, 165, 255)
     elif raw_gesture in PAD_MAPPING:
         confidence_text = "" if confidence is None else f" ({confidence * 100:.1f}%)"
-        status_text = f"Detecting: {raw_gesture}{confidence_text}"
+        status_text = f"Right: Detecting {raw_gesture}{confidence_text}"
         color = (0, 255, 255)
-    elif not has_hand:
-        status_text = "No Hand: RELEASE"
+    elif not has_right_hand:
+        status_text = "Right: No Hand"
         color = (0, 0, 255)
     else:
-        status_text = "Unknown: RELEASE"
+        status_text = "Right: Unknown"
         color = (0, 0, 255)
 
-    cv2.putText(frame, status_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2, cv2.LINE_AA)
-    cv2.putText(frame, "Press 'q' to quit", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    if not savj_state.is_calibrated:
+        left_text = f"Calibrating Left Arm... {savj_state.sample_count}/{CALIBRATION_FRAMES}"
+        left_color = (0, 165, 255)
+    elif savj_ready:
+        left_text = f"Left Stick: X={axis_x} Y={axis_y}"
+        left_color = (0, 255, 0)
+    else:
+        left_text = "Left Stick: No Pose"
+        left_color = (0, 0, 255)
+
+    cv2.putText(frame, status_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2, cv2.LINE_AA)
+    cv2.putText(frame, left_text, (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, left_color, 2, cv2.LINE_AA)
+    cv2.putText(frame, "Press 'q' to quit", (30, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
 
 def write_latency_row(writer, timestamp: str, svm_ms: Optional[float], knn_ms: Optional[float]) -> None:
-    """写入单帧 SVM/KNN 延迟记录。"""
+    """Write one frame of SVM/KNN latency data."""
     writer.writerow(
         [
             timestamp,
@@ -327,15 +414,15 @@ def write_latency_row(writer, timestamp: str, svm_ms: Optional[float], knn_ms: O
 
 
 def write_resource_row(writer, process: psutil.Process, timestamp: str) -> None:
-    """写入当前 Python 进程 CPU 占用和内存消耗。"""
+    """Write current CPU and memory usage for this Python process."""
     cpu_percent = process.cpu_percent(interval=None)
     memory_mb = process.memory_info().rss / (1024 * 1024)
     writer.writerow([timestamp, f"{cpu_percent:.2f}", f"{memory_mb:.2f}"])
 
 
 def main() -> None:
-    """实时推理与虚拟手柄控制主程序入口。"""
-    scaler, best_model, svm_model, knn_model = load_runtime_objects()
+    """Run real-time Holistic inference and virtual gamepad control."""
+    scaler, svm_model, knn_model = load_runtime_objects()
     process = psutil.Process()
     process.cpu_percent(interval=None)
 
@@ -344,28 +431,30 @@ def main() -> None:
     pressed_button = None
     no_hand_frames = 0
     last_resource_log_time = 0.0
+    savj_state = SavjState()
 
-    mp_hands = mp.solutions.hands
     cap = cv2.VideoCapture(CAMERA_INDEX)
-
     if not cap.isOpened():
-        raise RuntimeError(f"无法打开摄像头，摄像头编号: {CAMERA_INDEX}")
+        raise RuntimeError(f"Cannot open camera with index {CAMERA_INDEX}")
 
-    print("Phase 3 实时手柄控制已启动。按 q 退出程序。")
-    print(f"逐帧延迟日志: {LATENCY_LOG_PATH}")
-    print(f"资源占用日志: {RESOURCE_LOG_PATH}")
+    print("Phase 3 dual-hand gamepad controller started. Press q to quit.")
+    print(f"Latency log: {LATENCY_LOG_PATH}")
+    print(f"Resource log: {RESOURCE_LOG_PATH}")
 
     try:
         with LATENCY_LOG_PATH.open("w", newline="", encoding="utf-8") as latency_file, RESOURCE_LOG_PATH.open(
             "w",
             newline="",
             encoding="utf-8",
-        ) as resource_file, mp_hands.Hands(
+        ) as resource_file, mp_holistic.Holistic(
             static_image_mode=False,
-            max_num_hands=MAX_NUM_HANDS,
+            model_complexity=1,
+            smooth_landmarks=True,
+            enable_segmentation=False,
+            refine_face_landmarks=False,
             min_detection_confidence=MIN_DETECTION_CONFIDENCE,
             min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
-        ) as hands_detector:
+        ) as holistic_detector:
             latency_writer = csv.writer(latency_file)
             resource_writer = csv.writer(resource_file)
             latency_writer.writerow(["timestamp", "svm_ms", "knn_ms"])
@@ -374,24 +463,28 @@ def main() -> None:
             while True:
                 success, frame = cap.read()
                 if not success:
-                    print("[警告] 无法读取摄像头画面，已跳过当前帧。")
+                    print("[Warning] Failed to read a camera frame; skipping this frame.")
                     continue
 
                 frame = cv2.flip(frame, 1)
                 timestamp = current_timestamp()
 
                 try:
-                    raw_gesture, confidence, has_hand, svm_ms, knn_ms = predict_gesture_and_latency(
-                        frame=frame,
-                        hands_detector=hands_detector,
+                    image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    results = holistic_detector.process(image_rgb)
+                    draw_holistic_landmarks(frame, results)
+
+                    axis_x, axis_y, savj_ready = update_savj(frame, results.pose_landmarks, savj_state)
+                    raw_gesture, confidence, has_right_hand, svm_ms, knn_ms = predict_right_hand_gesture_and_latency(
+                        right_hand_landmarks=results.right_hand_landmarks,
                         scaler=scaler,
-                        best_model=best_model,
                         svm_model=svm_model,
                         knn_model=knn_model,
                     )
                 except Exception as exc:
-                    print(f"[警告] 当前帧预测失败: {exc}")
-                    raw_gesture, confidence, has_hand, svm_ms, knn_ms = None, None, False, None, None
+                    print(f"[Warning] Current frame prediction failed: {exc}")
+                    axis_x, axis_y, savj_ready = 0, 0, savj_state.is_calibrated
+                    raw_gesture, confidence, has_right_hand, svm_ms, knn_ms = None, None, False, None, None
 
                 write_latency_row(latency_writer, timestamp, svm_ms, knn_ms)
                 latency_file.flush()
@@ -403,9 +496,8 @@ def main() -> None:
                     last_resource_log_time = now
 
                 stable_gesture = None
-
                 is_confident = (
-                    has_hand
+                    has_right_hand
                     and raw_gesture in PAD_MAPPING
                     and confidence is not None
                     and confidence >= CONFIDENCE_THRESHOLD
@@ -417,17 +509,14 @@ def main() -> None:
                     stable_gesture = get_stable_gesture(prediction_history)
 
                     if stable_gesture is not None:
-                        current_gesture, pressed_button = press_gesture_button(
+                        current_gesture, pressed_button = apply_right_hand_state(
                             gesture=stable_gesture,
                             current_gesture=current_gesture,
                             pressed_button=pressed_button,
                         )
-                elif has_hand:
+                elif has_right_hand:
                     prediction_history.clear()
                     no_hand_frames = 0
-                    release_pressed_button(pressed_button)
-                    current_gesture = None
-                    pressed_button = None
                 else:
                     prediction_history.clear()
                     no_hand_frames += 1
@@ -437,20 +526,30 @@ def main() -> None:
                         current_gesture = None
                         pressed_button = None
 
-                draw_status(frame, raw_gesture, confidence, stable_gesture, has_hand)
-                cv2.imshow("Static Gesture Game Controller", frame)
+                draw_status(
+                    frame=frame,
+                    raw_gesture=raw_gesture,
+                    confidence=confidence,
+                    stable_gesture=stable_gesture,
+                    has_right_hand=has_right_hand,
+                    axis_x=axis_x,
+                    axis_y=axis_y,
+                    savj_state=savj_state,
+                    savj_ready=savj_ready,
+                )
+                cv2.imshow("Dual-Hand Holistic Game Controller", frame)
 
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
     except KeyboardInterrupt:
-        print("\n收到 Ctrl+C，准备退出程序。")
+        print("\nReceived Ctrl+C; shutting down.")
     finally:
         release_pressed_button(pressed_button)
         reset_gamepad()
         cap.release()
         cv2.destroyAllWindows()
-        print("已释放摄像头、窗口和所有虚拟手柄按键。")
+        print("Camera, windows, joystick, and buttons have been released.")
 
 
 if __name__ == "__main__":
