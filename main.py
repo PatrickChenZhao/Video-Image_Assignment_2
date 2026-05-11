@@ -4,18 +4,14 @@ Phase 3: dual-hand multimodal virtual Xbox controller.
 Run:
     python main.py
 
-Logs:
-    1. latency_log.csv records per-frame SVM/KNN inference latency.
-    2. resource_log.csv records Python process CPU and memory usage once per second.
+The runtime loop is optimized for low latency: no CSV logging and no KNN
+inference are performed during live control.
 """
 
 from __future__ import annotations
 
-import csv
 import math
-import time
 from collections import deque
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -23,12 +19,9 @@ import cv2
 import joblib
 import mediapipe as mp
 import numpy as np
-import psutil
 import vgamepad as vg
 
 
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
 mp_holistic = mp.solutions.holistic
 
 
@@ -36,6 +29,7 @@ mp_holistic = mp.solutions.holistic
 DEBOUNCE_FRAMES = 3
 CONFIDENCE_THRESHOLD = 0.80
 NO_HAND_RELEASE_FRAMES = 3
+RIGHT_HAND_SVM_INTERVAL_FRAMES = 2
 
 # Left-arm shoulder-anchored virtual joystick settings.
 SAVJ_DEAD_ZONE_PIXELS = 40
@@ -67,11 +61,11 @@ PAD_MAPPING = {
 gamepad = vg.VX360Gamepad()
 
 CAMERA_INDEX = 0
+CAMERA_FRAME_WIDTH = 424
+CAMERA_FRAME_HEIGHT = 240
 MIN_DETECTION_CONFIDENCE = 0.6
 MIN_TRACKING_CONFIDENCE = 0.6
 
-HAND_LANDMARK_STYLE = mp_drawing_styles.get_default_hand_landmarks_style()
-GREEN_HAND_CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
 SAVJ_SHOULDER_COLOR = (255, 0, 0)
 SAVJ_WRIST_COLOR = (0, 0, 255)
 SAVJ_ARM_LINE_COLOR = (0, 255, 0)
@@ -79,19 +73,11 @@ SAVJ_ARM_LINE_COLOR = (0, 255, 0)
 ROOT_DIR = Path(__file__).resolve().parent
 SCALER_PATH = ROOT_DIR / "scaler.pkl"
 SVM_MODEL_PATH = ROOT_DIR / "svm_model.pkl"
-KNN_MODEL_PATH = ROOT_DIR / "knn_model.pkl"
-LATENCY_LOG_PATH = ROOT_DIR / "latency_log.csv"
-RESOURCE_LOG_PATH = ROOT_DIR / "resource_log.csv"
-
-
-def current_timestamp() -> str:
-    """Return an ISO timestamp suitable for CSV logging."""
-    return datetime.now().isoformat(timespec="milliseconds")
 
 
 def load_runtime_objects():
-    """Load the scaler, SVM model, and KNN model saved by train_model.py."""
-    required_files = [SCALER_PATH, SVM_MODEL_PATH, KNN_MODEL_PATH]
+    """Load the scaler and SVM model saved by train_model.py."""
+    required_files = [SCALER_PATH, SVM_MODEL_PATH]
     missing_files = [file_path for file_path in required_files if not file_path.exists()]
     if missing_files:
         missing_text = "\n".join(str(file_path) for file_path in missing_files)
@@ -103,8 +89,7 @@ def load_runtime_objects():
 
     scaler = joblib.load(SCALER_PATH)
     svm_model = joblib.load(SVM_MODEL_PATH)
-    knn_model = joblib.load(KNN_MODEL_PATH)
-    return scaler, svm_model, knn_model
+    return scaler, svm_model
 
 
 def extract_relative_features_from_landmarks(hand_landmarks) -> list[float]:
@@ -141,14 +126,6 @@ def extract_relative_features_from_landmarks(hand_landmarks) -> list[float]:
     return features
 
 
-def time_model_prediction(model, scaled_features) -> tuple[str, float]:
-    """Run one prediction and return the prediction and elapsed milliseconds."""
-    start_time = time.perf_counter()
-    prediction = model.predict(scaled_features)[0]
-    elapsed_ms = (time.perf_counter() - start_time) * 1000
-    return str(prediction), elapsed_ms
-
-
 def predict_with_confidence(model, scaled_features) -> tuple[str, float]:
     """Predict with the SVM model and return the highest class probability."""
     if not hasattr(model, "predict_proba"):
@@ -164,25 +141,21 @@ def predict_with_confidence(model, scaled_features) -> tuple[str, float]:
     return prediction, confidence
 
 
-def predict_right_hand_gesture_and_latency(
+def predict_right_hand_gesture(
     right_hand_landmarks,
     scaler,
     svm_model,
-    knn_model,
-) -> tuple[Optional[str], Optional[float], bool, Optional[float], Optional[float]]:
-    """Classify the right hand with SVM and measure SVM/KNN inference latency."""
+) -> tuple[Optional[str], Optional[float], bool]:
+    """Classify the right hand with the SVM model."""
     if right_hand_landmarks is None:
-        return None, None, False, None, None
+        return None, None, False
 
     features = extract_relative_features_from_landmarks(right_hand_landmarks)
     feature_array = np.array(features, dtype=np.float32).reshape(1, -1)
     scaled_features = scaler.transform(feature_array)
 
-    _, svm_ms = time_model_prediction(svm_model, scaled_features)
-    _, knn_ms = time_model_prediction(knn_model, scaled_features)
-
     svm_prediction, confidence = predict_with_confidence(svm_model, scaled_features)
-    return svm_prediction, confidence, True, svm_ms, knn_ms
+    return svm_prediction, confidence, True
 
 
 def get_stable_gesture(prediction_history: deque[str]) -> Optional[str]:
@@ -337,18 +310,8 @@ def draw_savj_visual(frame, pose_landmarks) -> None:
 
 
 def draw_holistic_landmarks(frame, results) -> None:
-    """Draw pose and controller-right hand landmarks from MediaPipe Holistic output."""
+    """Draw only the lightweight SAVJ visualization."""
     draw_savj_visual(frame, results.pose_landmarks)
-
-    controller_right_hand_landmarks = get_controller_right_hand_landmarks(results)
-    if controller_right_hand_landmarks:
-        mp_drawing.draw_landmarks(
-            frame,
-            controller_right_hand_landmarks,
-            mp_holistic.HAND_CONNECTIONS,
-            HAND_LANDMARK_STYLE,
-            GREEN_HAND_CONNECTION_STYLE,
-        )
 
 
 def get_controller_right_hand_landmarks(results):
@@ -400,63 +363,39 @@ def draw_status(
     cv2.putText(frame, "Press 'q' to quit", (30, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
 
-def write_latency_row(writer, timestamp: str, svm_ms: Optional[float], knn_ms: Optional[float]) -> None:
-    """Write one frame of SVM/KNN latency data."""
-    writer.writerow(
-        [
-            timestamp,
-            "" if svm_ms is None else f"{svm_ms:.6f}",
-            "" if knn_ms is None else f"{knn_ms:.6f}",
-        ]
-    )
-
-
-def write_resource_row(writer, process: psutil.Process, timestamp: str) -> None:
-    """Write current CPU and memory usage for this Python process."""
-    cpu_percent = process.cpu_percent(interval=None)
-    memory_mb = process.memory_info().rss / (1024 * 1024)
-    writer.writerow([timestamp, f"{cpu_percent:.2f}", f"{memory_mb:.2f}"])
-
-
 def main() -> None:
     """Run real-time Holistic inference and virtual gamepad control."""
-    scaler, svm_model, knn_model = load_runtime_objects()
-    process = psutil.Process()
-    process.cpu_percent(interval=None)
+    scaler, svm_model = load_runtime_objects()
 
     prediction_history: deque[str] = deque(maxlen=DEBOUNCE_FRAMES)
     current_gesture: Optional[str] = None
     pressed_button = None
     no_hand_frames = 0
-    last_resource_log_time = 0.0
+    frame_index = 0
+    raw_gesture: Optional[str] = None
+    confidence: Optional[float] = None
+    has_right_hand = False
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_FRAME_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_FRAME_HEIGHT)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera with index {CAMERA_INDEX}")
 
     print("Phase 3 dual-hand gamepad controller started. Press q to quit.")
-    print(f"Latency log: {LATENCY_LOG_PATH}")
-    print(f"Resource log: {RESOURCE_LOG_PATH}")
+    print("Runtime logging and KNN inference are disabled for lower latency.")
 
     try:
-        with LATENCY_LOG_PATH.open("w", newline="", encoding="utf-8") as latency_file, RESOURCE_LOG_PATH.open(
-            "w",
-            newline="",
-            encoding="utf-8",
-        ) as resource_file, mp_holistic.Holistic(
+        with mp_holistic.Holistic(
             static_image_mode=False,
-            model_complexity=1,
-            smooth_landmarks=True,
+            model_complexity=0,
+            smooth_landmarks=False,
             enable_segmentation=False,
             refine_face_landmarks=False,
             min_detection_confidence=MIN_DETECTION_CONFIDENCE,
             min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
         ) as holistic_detector:
-            latency_writer = csv.writer(latency_file)
-            resource_writer = csv.writer(resource_file)
-            latency_writer.writerow(["timestamp", "svm_ms", "knn_ms"])
-            resource_writer.writerow(["timestamp", "cpu_percent", "memory_mb"])
-
             while True:
                 success, frame = cap.read()
                 if not success:
@@ -464,7 +403,7 @@ def main() -> None:
                     continue
 
                 frame = cv2.flip(frame, 1)
-                timestamp = current_timestamp()
+                frame_index += 1
 
                 try:
                     image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -473,25 +412,20 @@ def main() -> None:
 
                     axis_x, axis_y, has_left_arm = update_savj(frame, results.pose_landmarks)
                     controller_right_hand_landmarks = get_controller_right_hand_landmarks(results)
-                    raw_gesture, confidence, has_right_hand, svm_ms, knn_ms = predict_right_hand_gesture_and_latency(
-                        right_hand_landmarks=controller_right_hand_landmarks,
-                        scaler=scaler,
-                        svm_model=svm_model,
-                        knn_model=knn_model,
-                    )
+                    if frame_index % RIGHT_HAND_SVM_INTERVAL_FRAMES == 0:
+                        raw_gesture, confidence, has_right_hand = predict_right_hand_gesture(
+                            right_hand_landmarks=controller_right_hand_landmarks,
+                            scaler=scaler,
+                            svm_model=svm_model,
+                        )
+                    elif controller_right_hand_landmarks is None:
+                        raw_gesture, confidence, has_right_hand = None, None, False
+                    else:
+                        has_right_hand = True
                 except Exception as exc:
                     print(f"[Warning] Current frame prediction failed: {exc}")
                     axis_x, axis_y, has_left_arm = 0, 0, False
-                    raw_gesture, confidence, has_right_hand, svm_ms, knn_ms = None, None, False, None, None
-
-                write_latency_row(latency_writer, timestamp, svm_ms, knn_ms)
-                latency_file.flush()
-
-                now = time.monotonic()
-                if now - last_resource_log_time >= 1.0:
-                    write_resource_row(resource_writer, process, timestamp)
-                    resource_file.flush()
-                    last_resource_log_time = now
+                    raw_gesture, confidence, has_right_hand = None, None, False
 
                 stable_gesture = None
                 is_confident = (
