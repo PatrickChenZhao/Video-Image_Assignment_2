@@ -23,6 +23,8 @@ import vgamepad as vg
 
 
 mp_holistic = mp.solutions.holistic
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
 
 
 # Right-hand SVM button recognition settings.
@@ -69,6 +71,8 @@ MIN_TRACKING_CONFIDENCE = 0.6
 SAVJ_SHOULDER_COLOR = (255, 0, 0)
 SAVJ_WRIST_COLOR = (0, 0, 255)
 SAVJ_ARM_LINE_COLOR = (0, 255, 0)
+HAND_LANDMARK_STYLE = mp_drawing_styles.get_default_hand_landmarks_style()
+GREEN_HAND_CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
 
 ROOT_DIR = Path(__file__).resolve().parent
 SCALER_PATH = ROOT_DIR / "scaler.pkl"
@@ -310,8 +314,17 @@ def draw_savj_visual(frame, pose_landmarks) -> None:
 
 
 def draw_holistic_landmarks(frame, results) -> None:
-    """Draw only the lightweight SAVJ visualization."""
+    """Draw SAVJ and controller-right hand landmarks."""
     draw_savj_visual(frame, results.pose_landmarks)
+    controller_right_hand_landmarks = get_controller_right_hand_landmarks(results)
+    if controller_right_hand_landmarks:
+        mp_drawing.draw_landmarks(
+            frame,
+            controller_right_hand_landmarks,
+            mp_holistic.HAND_CONNECTIONS,
+            HAND_LANDMARK_STYLE,
+            GREEN_HAND_CONNECTION_STYLE,
+        )
 
 
 def get_controller_right_hand_landmarks(results):
