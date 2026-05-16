@@ -1,0 +1,3 @@
+power shell：
+
+$t = Get-Date -Format "yyyyMMdd_HHmmss"; $i=1; Get-ChildItem -Path "C:\Users\chen\Downloads\thumbup-jpg\ezgif-7716fdf7ea2b71a2-jpg" -Filter *.jpg | Sort-Object LastWriteTime | ForEach-Object { Rename-Item -LiteralPath $_.FullName -NewName ("$t-{0:D3}.jpg" -f $i); $i++ }
