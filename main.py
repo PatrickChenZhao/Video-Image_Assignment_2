@@ -35,8 +35,8 @@ HAND_SVM_INTERVAL_FRAMES = 2
 SAVJ_DEAD_ZONE_PIXELS = 40
 SAVJ_R_MAX_PIXELS = 150
 XINPUT_AXIS_MAX = 32767
-CONTROL_LEFT_SHOULDER_LANDMARK = 12
-CONTROL_LEFT_WRIST_LANDMARK = 16
+CONTROL_LEFT_SHOULDER_LANDMARK = 11
+CONTROL_LEFT_WRIST_LANDMARK = 15
 
 PAD_KIND_BUTTON = "button"
 PAD_KIND_DPAD = "dpad"
@@ -379,7 +379,8 @@ def apply_left_hand_state(new_state: Optional[str]) -> None:
     if new_state == current_left_state:
         return
 
-    release_state(current_left_state)
+    # Left-hand gestures are exclusive; any non-left-control state releases LB, LT, and L3.
+    release_all_hand_controls(HAND_LEFT)
 
     if new_state is not None:
         press_state(new_state)
@@ -394,14 +395,10 @@ def apply_right_hand_state(new_state: Optional[str]) -> None:
     if new_state == current_right_state:
         return
 
-    if new_state == "rock":
-        release_all_hand_controls(HAND_RIGHT)
-        current_right_state = new_state
-        return
+    # Right-hand gestures are exclusive; rock is the explicit all-release state.
+    release_all_hand_controls(HAND_RIGHT)
 
-    release_state(current_right_state)
-
-    if new_state is not None:
+    if new_state is not None and new_state != "rock":
         press_state(new_state)
 
     current_right_state = new_state
@@ -414,18 +411,6 @@ def reset_gamepad() -> None:
         gamepad.update()
     except Exception as exc:
         print(f"[Warning] Failed to reset gamepad: {exc}")
-
-
-def clamp(value: float, minimum: float, maximum: float) -> float:
-    """Clamp a float to a closed interval."""
-    return max(minimum, min(maximum, value))
-
-
-def map_relative_position_to_axis(relative_position: float) -> int:
-    """Map a clipped shoulder-relative pixel position to the XInput axis range."""
-    clipped_position = clamp(relative_position, -SAVJ_R_MAX_PIXELS, SAVJ_R_MAX_PIXELS)
-    axis_value = int((clipped_position / SAVJ_R_MAX_PIXELS) * XINPUT_AXIS_MAX)
-    return int(clamp(axis_value, -XINPUT_AXIS_MAX, XINPUT_AXIS_MAX))
 
 
 def send_left_joystick(axis_x: int, axis_y: int) -> None:
@@ -457,7 +442,7 @@ def get_left_shoulder_wrist_pixels(
 
 
 def update_savj(frame, pose_landmarks) -> tuple[int, int, bool]:
-    """Update the left stick from the real-time wrist position relative to the shoulder."""
+    """Update the left stick from the shoulder-anchored left-arm vector."""
     frame_height, frame_width = frame.shape[:2]
     shoulder_wrist_pixels = get_left_shoulder_wrist_pixels(pose_landmarks, frame_width, frame_height)
 
@@ -468,14 +453,19 @@ def update_savj(frame, pose_landmarks) -> tuple[int, int, bool]:
     (shoulder_x, shoulder_y), (wrist_x, wrist_y) = shoulder_wrist_pixels
     rel_x = wrist_x - shoulder_x
     rel_y = shoulder_y - wrist_y
-    distance = math.sqrt(rel_x**2 + rel_y**2)
+    distance = math.hypot(rel_x, rel_y)
 
-    if distance < SAVJ_DEAD_ZONE_PIXELS:
+    if distance < SAVJ_DEAD_ZONE_PIXELS or distance == 0:
         joy_x = 0
         joy_y = 0
     else:
-        joy_x = map_relative_position_to_axis(rel_x)
-        joy_y = map_relative_position_to_axis(rel_y)
+        # Separate direction and power so diagonal movement keeps the true arm angle.
+        dir_x = rel_x / distance
+        dir_y = rel_y / distance
+        active_dist = min(distance, SAVJ_R_MAX_PIXELS)
+        curved_power = ((active_dist / SAVJ_R_MAX_PIXELS) ** 2) * XINPUT_AXIS_MAX
+        joy_x = int(dir_x * curved_power)
+        joy_y = int(dir_y * curved_power)
 
     send_left_joystick(joy_x, joy_y)
     return joy_x, joy_y, True
@@ -511,13 +501,13 @@ def draw_savj_visual(frame, pose_landmarks) -> None:
 
 
 def get_physical_left_hand_landmarks(results):
-    """Return the physical left hand after the mirrored-camera hand swap."""
-    return results.right_hand_landmarks
+    """Return the physical left hand without camera mirroring compensation."""
+    return results.left_hand_landmarks
 
 
 def get_physical_right_hand_landmarks(results):
-    """Return the physical right hand after the mirrored-camera hand swap."""
-    return results.left_hand_landmarks
+    """Return the physical right hand without camera mirroring compensation."""
+    return results.right_hand_landmarks
 
 
 def draw_holistic_landmarks(frame, results) -> None:
@@ -668,7 +658,6 @@ def main() -> None:
                     print("[Warning] Failed to read a camera frame; skipping this frame.")
                     continue
 
-                frame = cv2.flip(frame, 1)
                 frame_index += 1
                 left_stable_ready = False
                 left_stable_state: Optional[str] = None
