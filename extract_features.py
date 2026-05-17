@@ -24,10 +24,21 @@ DATASET_DIR = ROOT_DIR / "gesture_data_sample"
 OUTPUT_CSV = ROOT_DIR / "gesture_dataset.csv"
 
 GESTURE_LABELS = {
-    "paper": "Paper",
-    "scissors": "Scissors",
-    "rock": "Rock",
-    "thumb": "Thumb",
+    "clasp": "clasp",
+    "down": "down",
+    "home": "home",
+    "lb": "lb",
+    "left": "left",
+    "leftrunning": "leftrunning",
+    "lt": "lt",
+    "paper": "paper",
+    "rb": "rb",
+    "right": "right",
+    "rock": "rock",
+    "rt": "rt",
+    "scissors": "scissors",
+    "thumb": "thumb",
+    "up": "up",
 }
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -93,7 +104,7 @@ def extract_relative_features(
 
 
 def iter_gesture_images() -> list[tuple[Path, str]]:
-    """Collect image paths from the four supported gesture folders."""
+    """Collect image paths from the supported gesture folders."""
     image_items: list[tuple[Path, str]] = []
 
     for folder_name, label in GESTURE_LABELS.items():

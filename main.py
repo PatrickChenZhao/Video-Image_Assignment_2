@@ -11,7 +11,7 @@ inference are performed during live control.
 from __future__ import annotations
 
 import math
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 from typing import Optional
 
@@ -27,40 +27,151 @@ mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 
 
-# Right-hand SVM button recognition settings.
+# Dual-hand SVM button recognition settings.
 DEBOUNCE_FRAMES = 3
-CONFIDENCE_THRESHOLD = 0.80
-NO_HAND_RELEASE_FRAMES = 3
-RIGHT_HAND_SVM_INTERVAL_FRAMES = 2
+HAND_SVM_INTERVAL_FRAMES = 2
 
 # Left-arm shoulder-anchored virtual joystick settings.
 SAVJ_DEAD_ZONE_PIXELS = 40
 SAVJ_R_MAX_PIXELS = 150
 XINPUT_AXIS_MAX = 32767
-OPPOSITE_CAMERA_HAND_SWAP = True
 CONTROL_LEFT_SHOULDER_LANDMARK = 12
 CONTROL_LEFT_WRIST_LANDMARK = 16
 
+PAD_KIND_BUTTON = "button"
+PAD_KIND_DPAD = "dpad"
+PAD_KIND_TRIGGER = "trigger"
+PAD_KIND_RELEASE = "release"
+HAND_LEFT = "left"
+HAND_RIGHT = "right"
+TRIGGER_LEFT = "left"
+TRIGGER_RIGHT = "right"
+
 PAD_MAPPING = {
-    "Paper": {
-        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
-        "display": "Paper: A",
+    "clasp": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
+    "down": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN,
+    "home": vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
+    "left": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT,
+    "paper": vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
+    "rb": vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
+    "right": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT,
+    "rt": None,
+    "scissors": vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
+    "thumb": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
+    "up": vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP,
+    "rock": None,
+    "lb": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
+    "leftrunning": vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB,
+    "lt": None,
+}
+
+PAD_ACTIONS = {
+    # Physical right hand: action buttons, D-pad, right shoulder, RT, release.
+    "clasp": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_BUTTON,
+        "button": PAD_MAPPING["clasp"],
+        "display": "Right Y",
     },
-    "Scissors": {
-        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
-        "display": "Scissors: X",
+    "down": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_DPAD,
+        "button": PAD_MAPPING["down"],
+        "display": "Right D-pad Down",
     },
-    "Thumb": {
-        "button": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
-        "display": "Thumb: B",
+    "home": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_BUTTON,
+        "button": PAD_MAPPING["home"],
+        "display": "Right Start",
     },
-    "Rock": {
+    "left": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_DPAD,
+        "button": PAD_MAPPING["left"],
+        "display": "Right D-pad Left",
+    },
+    "paper": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_BUTTON,
+        "button": PAD_MAPPING["paper"],
+        "display": "Right A",
+    },
+    "rb": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_BUTTON,
+        "button": PAD_MAPPING["rb"],
+        "display": "Right RB",
+    },
+    "right": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_DPAD,
+        "button": PAD_MAPPING["right"],
+        "display": "Right D-pad Right",
+    },
+    "rt": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_TRIGGER,
+        "trigger": TRIGGER_RIGHT,
+        "display": "Right RT",
+    },
+    "scissors": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_BUTTON,
+        "button": PAD_MAPPING["scissors"],
+        "display": "Right X",
+    },
+    "thumb": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_BUTTON,
+        "button": PAD_MAPPING["thumb"],
+        "display": "Right B",
+    },
+    "up": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_DPAD,
+        "button": PAD_MAPPING["up"],
+        "display": "Right D-pad Up",
+    },
+    "rock": {
+        "hand": HAND_RIGHT,
+        "kind": PAD_KIND_RELEASE,
         "button": None,
-        "display": "Rock: RELEASE",
+        "display": "Right Release",
+    },
+    # Physical left hand: left shoulder, left stick click, LT.
+    "lb": {
+        "hand": HAND_LEFT,
+        "kind": PAD_KIND_BUTTON,
+        "button": PAD_MAPPING["lb"],
+        "display": "Left LB",
+    },
+    "leftrunning": {
+        "hand": HAND_LEFT,
+        "kind": PAD_KIND_BUTTON,
+        "button": PAD_MAPPING["leftrunning"],
+        "display": "Left Stick Click",
+    },
+    "lt": {
+        "hand": HAND_LEFT,
+        "kind": PAD_KIND_TRIGGER,
+        "trigger": TRIGGER_LEFT,
+        "display": "Left LT",
     },
 }
 
+LEFT_GESTURES = {
+    gesture for gesture, mapping in PAD_ACTIONS.items() if mapping["hand"] == HAND_LEFT
+}
+RIGHT_GESTURES = {
+    gesture for gesture, mapping in PAD_ACTIONS.items() if mapping["hand"] == HAND_RIGHT
+}
+
 gamepad = vg.VX360Gamepad()
+left_gesture_queue: deque[Optional[str]] = deque(maxlen=DEBOUNCE_FRAMES)
+right_gesture_queue: deque[Optional[str]] = deque(maxlen=DEBOUNCE_FRAMES)
+current_left_state: Optional[str] = None
+current_right_state: Optional[str] = None
 
 CAMERA_INDEX = 0
 CAMERA_FRAME_WIDTH = 424
@@ -71,8 +182,9 @@ MIN_TRACKING_CONFIDENCE = 0.6
 SAVJ_SHOULDER_COLOR = (255, 0, 0)
 SAVJ_WRIST_COLOR = (0, 0, 255)
 SAVJ_ARM_LINE_COLOR = (0, 255, 0)
+LEFT_HAND_CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(255, 128, 0), thickness=2)
+RIGHT_HAND_CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
 HAND_LANDMARK_STYLE = mp_drawing_styles.get_default_hand_landmarks_style()
-GREEN_HAND_CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
 
 ROOT_DIR = Path(__file__).resolve().parent
 SCALER_PATH = ROOT_DIR / "scaler.pkl"
@@ -93,7 +205,22 @@ def load_runtime_objects():
 
     scaler = joblib.load(SCALER_PATH)
     svm_model = joblib.load(SVM_MODEL_PATH)
+    model_labels = {normalize_gesture_label(str(label)) for label in svm_model.classes_}
+    expected_labels = set(PAD_MAPPING)
+    if model_labels != expected_labels:
+        missing_labels = sorted(expected_labels - model_labels)
+        extra_labels = sorted(model_labels - expected_labels)
+        raise ValueError(
+            "svm_model.pkl labels do not match PAD_MAPPING. "
+            f"Missing: {missing_labels}; Extra: {extra_labels}. "
+            "Rerun: python train_model.py"
+        )
     return scaler, svm_model
+
+
+def normalize_gesture_label(label: str) -> str:
+    """Normalize legacy title-case model labels into runtime gesture keys."""
+    return label.strip().lower()
 
 
 def extract_relative_features_from_landmarks(hand_landmarks) -> list[float]:
@@ -140,21 +267,21 @@ def predict_with_confidence(model, scaled_features) -> tuple[str, float]:
 
     probabilities = model.predict_proba(scaled_features)[0]
     best_index = int(np.argmax(probabilities))
-    prediction = str(model.classes_[best_index])
+    prediction = normalize_gesture_label(str(model.classes_[best_index]))
     confidence = float(probabilities[best_index])
     return prediction, confidence
 
 
-def predict_right_hand_gesture(
-    right_hand_landmarks,
+def predict_hand_gesture(
+    hand_landmarks,
     scaler,
     svm_model,
 ) -> tuple[Optional[str], Optional[float], bool]:
-    """Classify the right hand with the SVM model."""
-    if right_hand_landmarks is None:
+    """Classify one detected hand with the SVM model."""
+    if hand_landmarks is None:
         return None, None, False
 
-    features = extract_relative_features_from_landmarks(right_hand_landmarks)
+    features = extract_relative_features_from_landmarks(hand_landmarks)
     feature_array = np.array(features, dtype=np.float32).reshape(1, -1)
     scaled_features = scaler.transform(feature_array)
 
@@ -162,56 +289,122 @@ def predict_right_hand_gesture(
     return svm_prediction, confidence, True
 
 
-def get_stable_gesture(prediction_history: deque[str]) -> Optional[str]:
-    """Return a gesture only when the debounce queue is full and unanimous."""
+def get_stable_state(prediction_history: deque[Optional[str]]) -> tuple[bool, Optional[str]]:
+    """Return a debounced state when a full queue has a majority winner."""
     if len(prediction_history) < DEBOUNCE_FRAMES:
-        return None
+        return False, None
 
-    first_prediction = prediction_history[0]
-    if all(prediction == first_prediction for prediction in prediction_history):
-        return first_prediction
+    state, count = Counter(prediction_history).most_common(1)[0]
+    if count > len(prediction_history) // 2:
+        return True, state
 
-    return None
+    return False, None
 
 
-def release_pressed_button(pressed_button) -> None:
-    """Release the currently held gamepad button and update the device."""
-    if pressed_button is None:
+def set_trigger(trigger: str, value: float) -> None:
+    """Set a trigger axis and update the virtual gamepad immediately."""
+    try:
+        if trigger == TRIGGER_LEFT:
+            gamepad.left_trigger_float(value)
+        elif trigger == TRIGGER_RIGHT:
+            gamepad.right_trigger_float(value)
+        else:
+            raise ValueError(f"Unknown trigger axis: {trigger}")
+        gamepad.update()
+    except Exception as exc:
+        print(f"[Warning] Failed to set {trigger} trigger to {value}: {exc}")
+
+
+def press_mapped_button(button) -> None:
+    """Press a regular or D-pad button and update the virtual gamepad."""
+    try:
+        gamepad.press_button(button=button)
+        gamepad.update()
+    except Exception as exc:
+        print(f"[Warning] Failed to press gamepad button {button}: {exc}")
+
+
+def release_mapped_button(button) -> None:
+    """Release a regular or D-pad button and update the virtual gamepad."""
+    try:
+        gamepad.release_button(button=button)
+        gamepad.update()
+    except Exception as exc:
+        print(f"[Warning] Failed to release gamepad button {button}: {exc}")
+
+
+def release_state(gesture: Optional[str]) -> None:
+    """Release the controls held by one mapped gesture."""
+    if gesture is None:
         return
 
-    try:
-        gamepad.release_button(button=pressed_button)
-        gamepad.update()
-    except Exception as exc:
-        print(f"[Warning] Failed to release gamepad button {pressed_button}: {exc}")
-
-
-def apply_right_hand_state(
-    gesture: str,
-    current_gesture: Optional[str],
-    pressed_button,
-) -> tuple[Optional[str], object]:
-    """Apply a debounced right-hand gesture to the mapped Xbox button state."""
-    if gesture == current_gesture:
-        return current_gesture, pressed_button
-
-    release_pressed_button(pressed_button)
-
-    mapping = PAD_MAPPING.get(gesture)
+    mapping = PAD_ACTIONS.get(gesture)
     if mapping is None:
-        return None, None
+        return
 
-    target_button = mapping["button"]
-    if target_button is None:
-        return gesture, None
+    if mapping["kind"] == PAD_KIND_TRIGGER:
+        set_trigger(mapping["trigger"], 0.0)
+    elif mapping["kind"] in {PAD_KIND_BUTTON, PAD_KIND_DPAD}:
+        release_mapped_button(mapping["button"])
 
-    try:
-        gamepad.press_button(button=target_button)
-        gamepad.update()
-        return gesture, target_button
-    except Exception as exc:
-        print(f"[Warning] Failed to press gamepad button {target_button}: {exc}")
-        return None, None
+
+def press_state(gesture: str) -> None:
+    """Press the controls represented by one mapped gesture."""
+    mapping = PAD_ACTIONS.get(gesture)
+    if mapping is None:
+        return
+
+    if mapping["kind"] == PAD_KIND_TRIGGER:
+        set_trigger(mapping["trigger"], 1.0)
+    elif mapping["kind"] in {PAD_KIND_BUTTON, PAD_KIND_DPAD}:
+        press_mapped_button(mapping["button"])
+
+
+def release_all_hand_controls(hand: str) -> None:
+    """Release every button and trigger assigned to one physical hand."""
+    for mapping in PAD_ACTIONS.values():
+        if mapping["hand"] != hand:
+            continue
+
+        if mapping["kind"] == PAD_KIND_TRIGGER:
+            set_trigger(mapping["trigger"], 0.0)
+        elif mapping["kind"] in {PAD_KIND_BUTTON, PAD_KIND_DPAD}:
+            release_mapped_button(mapping["button"])
+
+
+def apply_left_hand_state(new_state: Optional[str]) -> None:
+    """Apply debounced physical-left-hand state changes."""
+    global current_left_state
+
+    if new_state == current_left_state:
+        return
+
+    release_state(current_left_state)
+
+    if new_state is not None:
+        press_state(new_state)
+
+    current_left_state = new_state
+
+
+def apply_right_hand_state(new_state: Optional[str]) -> None:
+    """Apply debounced physical-right-hand state changes."""
+    global current_right_state
+
+    if new_state == current_right_state:
+        return
+
+    if new_state == "rock":
+        release_all_hand_controls(HAND_RIGHT)
+        current_right_state = new_state
+        return
+
+    release_state(current_right_state)
+
+    if new_state is not None:
+        press_state(new_state)
+
+    current_right_state = new_state
 
 
 def reset_gamepad() -> None:
@@ -249,7 +442,7 @@ def get_left_shoulder_wrist_pixels(
     frame_width: int,
     frame_height: int,
 ) -> Optional[tuple[tuple[float, float], tuple[float, float]]]:
-    """Return left shoulder and left wrist pixel coordinates."""
+    """Return physical-left shoulder and wrist pixel coordinates."""
     if pose_landmarks is None:
         return None
 
@@ -288,8 +481,12 @@ def update_savj(frame, pose_landmarks) -> tuple[int, int, bool]:
     return joy_x, joy_y, True
 
 
-def get_savj_anchor_points(pose_landmarks, frame_width: int, frame_height: int) -> Optional[tuple[tuple[int, int], tuple[int, int]]]:
-    """Return controller-left shoulder and wrist points in pixel coordinates."""
+def get_savj_anchor_points(
+    pose_landmarks,
+    frame_width: int,
+    frame_height: int,
+) -> Optional[tuple[tuple[int, int], tuple[int, int]]]:
+    """Return physical-left shoulder and wrist points in pixel coordinates."""
     shoulder_wrist_pixels = get_left_shoulder_wrist_pixels(pose_landmarks, frame_width, frame_height)
     if shoulder_wrist_pixels is None:
         return None
@@ -313,80 +510,136 @@ def draw_savj_visual(frame, pose_landmarks) -> None:
     cv2.circle(frame, wrist_point, 8, SAVJ_WRIST_COLOR, -1, cv2.LINE_AA)
 
 
+def get_physical_left_hand_landmarks(results):
+    """Return the physical left hand after the mirrored-camera hand swap."""
+    return results.right_hand_landmarks
+
+
+def get_physical_right_hand_landmarks(results):
+    """Return the physical right hand after the mirrored-camera hand swap."""
+    return results.left_hand_landmarks
+
+
 def draw_holistic_landmarks(frame, results) -> None:
-    """Draw SAVJ and controller-right hand landmarks."""
+    """Draw SAVJ plus both controller hand landmarks."""
     draw_savj_visual(frame, results.pose_landmarks)
-    controller_right_hand_landmarks = get_controller_right_hand_landmarks(results)
-    if controller_right_hand_landmarks:
+
+    physical_left_hand_landmarks = get_physical_left_hand_landmarks(results)
+    if physical_left_hand_landmarks:
         mp_drawing.draw_landmarks(
             frame,
-            controller_right_hand_landmarks,
+            physical_left_hand_landmarks,
             mp_holistic.HAND_CONNECTIONS,
             HAND_LANDMARK_STYLE,
-            GREEN_HAND_CONNECTION_STYLE,
+            LEFT_HAND_CONNECTION_STYLE,
+        )
+
+    physical_right_hand_landmarks = get_physical_right_hand_landmarks(results)
+    if physical_right_hand_landmarks:
+        mp_drawing.draw_landmarks(
+            frame,
+            physical_right_hand_landmarks,
+            mp_holistic.HAND_CONNECTIONS,
+            HAND_LANDMARK_STYLE,
+            RIGHT_HAND_CONNECTION_STYLE,
         )
 
 
-def get_controller_right_hand_landmarks(results):
-    """Return the physical right hand landmarks after opposite-camera hand swapping."""
-    if OPPOSITE_CAMERA_HAND_SWAP:
-        return results.left_hand_landmarks
+def resolve_left_candidate(
+    raw_gesture: Optional[str],
+    has_hand: bool,
+) -> Optional[str]:
+    """Map a physical-left prediction into a debounced state candidate."""
+    if has_hand and raw_gesture in LEFT_GESTURES:
+        return raw_gesture
 
-    return results.right_hand_landmarks
+    return None
+
+
+def resolve_right_candidate(
+    raw_gesture: Optional[str],
+    has_hand: bool,
+) -> Optional[str]:
+    """Map a physical-right prediction into a debounced state candidate."""
+    if has_hand and raw_gesture in RIGHT_GESTURES:
+        return raw_gesture
+
+    return None
+
+
+def update_debounced_state(
+    queue: deque[Optional[str]],
+    candidate: Optional[str],
+) -> tuple[bool, Optional[str]]:
+    """Push a candidate into one hand's debounce queue and return stable output."""
+    queue.append(candidate)
+    return get_stable_state(queue)
+
+
+def format_hand_status(
+    hand_label: str,
+    active_state: Optional[str],
+    has_hand: bool,
+) -> tuple[str, tuple[int, int, int]]:
+    """Build one stable hand status line for the camera overlay."""
+    if active_state is None and not has_hand:
+        return f"{hand_label}: No Hand", (0, 0, 255)
+
+    if active_state is not None:
+        mapping = PAD_ACTIONS.get(active_state)
+        display = mapping["display"] if mapping else active_state
+        return f"{hand_label}: Holding {display}", (0, 255, 0)
+
+    return f"{hand_label}: Release", (0, 255, 0)
 
 
 def draw_status(
     frame,
-    raw_gesture: Optional[str],
-    confidence: Optional[float],
-    stable_gesture: Optional[str],
+    has_left_hand: bool,
     has_right_hand: bool,
     axis_x: int,
     axis_y: int,
     has_left_arm: bool,
 ) -> None:
     """Draw runtime status text on the camera frame."""
-    if stable_gesture in PAD_MAPPING:
-        confidence_text = "" if confidence is None else f" ({confidence * 100:.1f}%)"
-        status_text = f"Right: {PAD_MAPPING[stable_gesture]['display']}{confidence_text}"
-        color = (0, 255, 0)
-    elif raw_gesture in PAD_MAPPING and confidence is not None and confidence < CONFIDENCE_THRESHOLD:
-        status_text = f"Right: Low Confidence {raw_gesture} ({confidence * 100:.1f}%)"
-        color = (0, 165, 255)
-    elif raw_gesture in PAD_MAPPING:
-        confidence_text = "" if confidence is None else f" ({confidence * 100:.1f}%)"
-        status_text = f"Right: Detecting {raw_gesture}{confidence_text}"
-        color = (0, 255, 255)
-    elif not has_right_hand:
-        status_text = "Right: No Hand"
-        color = (0, 0, 255)
-    else:
-        status_text = "Right: Unknown"
-        color = (0, 0, 255)
+    left_text, left_color = format_hand_status(
+        hand_label="Left",
+        active_state=current_left_state,
+        has_hand=has_left_hand,
+    )
+    right_text, right_color = format_hand_status(
+        hand_label="Right",
+        active_state=current_right_state,
+        has_hand=has_right_hand,
+    )
 
     if has_left_arm:
-        left_text = f"Left Stick: joy_x={axis_x} joy_y={axis_y}"
-        left_color = (0, 255, 0)
+        stick_text = f"Left Stick: joy_x={axis_x} joy_y={axis_y}"
+        stick_color = (0, 255, 0)
     else:
-        left_text = "Left Stick: No Pose"
-        left_color = (0, 0, 255)
+        stick_text = "Left Stick: No Pose"
+        stick_color = (0, 0, 255)
 
-    cv2.putText(frame, status_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2, cv2.LINE_AA)
-    cv2.putText(frame, left_text, (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, left_color, 2, cv2.LINE_AA)
-    cv2.putText(frame, "Press 'q' to quit", (30, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(frame, left_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.75, left_color, 2, cv2.LINE_AA)
+    cv2.putText(frame, right_text, (30, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.75, right_color, 2, cv2.LINE_AA)
+    cv2.putText(frame, stick_text, (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, stick_color, 2, cv2.LINE_AA)
+    cv2.putText(frame, "Press 'q' to quit", (30, 155), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
 
 def main() -> None:
     """Run real-time Holistic inference and virtual gamepad control."""
-    scaler, svm_model = load_runtime_objects()
+    global current_left_state, current_right_state
 
-    prediction_history: deque[str] = deque(maxlen=DEBOUNCE_FRAMES)
-    current_gesture: Optional[str] = None
-    pressed_button = None
-    no_hand_frames = 0
+    scaler, svm_model = load_runtime_objects()
+    left_gesture_queue.clear()
+    right_gesture_queue.clear()
+    current_left_state = None
+    current_right_state = None
+
     frame_index = 0
-    raw_gesture: Optional[str] = None
-    confidence: Optional[float] = None
+    left_raw_gesture: Optional[str] = None
+    has_left_hand = False
+    right_raw_gesture: Optional[str] = None
     has_right_hand = False
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
@@ -417,6 +670,10 @@ def main() -> None:
 
                 frame = cv2.flip(frame, 1)
                 frame_index += 1
+                left_stable_ready = False
+                left_stable_state: Optional[str] = None
+                right_stable_ready = False
+                right_stable_state: Optional[str] = None
 
                 try:
                     image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -424,58 +681,69 @@ def main() -> None:
                     draw_holistic_landmarks(frame, results)
 
                     axis_x, axis_y, has_left_arm = update_savj(frame, results.pose_landmarks)
-                    controller_right_hand_landmarks = get_controller_right_hand_landmarks(results)
-                    if frame_index % RIGHT_HAND_SVM_INTERVAL_FRAMES == 0:
-                        raw_gesture, confidence, has_right_hand = predict_right_hand_gesture(
-                            right_hand_landmarks=controller_right_hand_landmarks,
+                    physical_left_landmarks = get_physical_left_hand_landmarks(results)
+                    physical_right_landmarks = get_physical_right_hand_landmarks(results)
+
+                    should_predict = frame_index % HAND_SVM_INTERVAL_FRAMES == 0
+                    if should_predict:
+                        left_raw_gesture, _, has_left_hand = predict_hand_gesture(
+                            hand_landmarks=physical_left_landmarks,
                             scaler=scaler,
                             svm_model=svm_model,
                         )
-                    elif controller_right_hand_landmarks is None:
-                        raw_gesture, confidence, has_right_hand = None, None, False
+                        right_raw_gesture, _, has_right_hand = predict_hand_gesture(
+                            hand_landmarks=physical_right_landmarks,
+                            scaler=scaler,
+                            svm_model=svm_model,
+                        )
+
+                        left_candidate = resolve_left_candidate(
+                            raw_gesture=left_raw_gesture,
+                            has_hand=has_left_hand,
+                        )
+                        right_candidate = resolve_right_candidate(
+                            raw_gesture=right_raw_gesture,
+                            has_hand=has_right_hand,
+                        )
+
+                        left_stable_ready, left_stable_state = update_debounced_state(
+                            left_gesture_queue,
+                            left_candidate,
+                        )
+                        right_stable_ready, right_stable_state = update_debounced_state(
+                            right_gesture_queue,
+                            right_candidate,
+                        )
+
+                        if left_stable_ready:
+                            apply_left_hand_state(left_stable_state)
+                        if right_stable_ready:
+                            apply_right_hand_state(right_stable_state)
                     else:
-                        has_right_hand = True
+                        has_left_hand = physical_left_landmarks is not None
+                        has_right_hand = physical_right_landmarks is not None
                 except Exception as exc:
                     print(f"[Warning] Current frame prediction failed: {exc}")
                     axis_x, axis_y, has_left_arm = 0, 0, False
-                    raw_gesture, confidence, has_right_hand = None, None, False
+                    left_raw_gesture, has_left_hand = None, False
+                    right_raw_gesture, has_right_hand = None, False
 
-                stable_gesture = None
-                is_confident = (
-                    has_right_hand
-                    and raw_gesture in PAD_MAPPING
-                    and confidence is not None
-                    and confidence >= CONFIDENCE_THRESHOLD
-                )
-
-                if is_confident:
-                    no_hand_frames = 0
-                    prediction_history.append(raw_gesture)
-                    stable_gesture = get_stable_gesture(prediction_history)
-
-                    if stable_gesture is not None:
-                        current_gesture, pressed_button = apply_right_hand_state(
-                            gesture=stable_gesture,
-                            current_gesture=current_gesture,
-                            pressed_button=pressed_button,
-                        )
-                elif has_right_hand:
-                    prediction_history.clear()
-                    no_hand_frames = 0
-                else:
-                    prediction_history.clear()
-                    no_hand_frames += 1
-
-                    if no_hand_frames >= NO_HAND_RELEASE_FRAMES:
-                        release_pressed_button(pressed_button)
-                        current_gesture = None
-                        pressed_button = None
+                    left_stable_ready, left_stable_state = update_debounced_state(
+                        left_gesture_queue,
+                        None,
+                    )
+                    right_stable_ready, right_stable_state = update_debounced_state(
+                        right_gesture_queue,
+                        None,
+                    )
+                    if left_stable_ready:
+                        apply_left_hand_state(left_stable_state)
+                    if right_stable_ready:
+                        apply_right_hand_state(right_stable_state)
 
                 draw_status(
                     frame=frame,
-                    raw_gesture=raw_gesture,
-                    confidence=confidence,
-                    stable_gesture=stable_gesture,
+                    has_left_hand=has_left_hand,
                     has_right_hand=has_right_hand,
                     axis_x=axis_x,
                     axis_y=axis_y,
@@ -489,11 +757,14 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nReceived Ctrl+C; shutting down.")
     finally:
-        release_pressed_button(pressed_button)
+        release_state(current_left_state)
+        release_state(current_right_state)
+        current_left_state = None
+        current_right_state = None
         reset_gamepad()
         cap.release()
         cv2.destroyAllWindows()
-        print("Camera, windows, joystick, and buttons have been released.")
+        print("Camera, windows, joystick, triggers, and buttons have been released.")
 
 
 if __name__ == "__main__":

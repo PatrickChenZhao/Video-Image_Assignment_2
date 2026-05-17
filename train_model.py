@@ -33,7 +33,23 @@ CONFUSION_MATRIX_CSV = ROOT_DIR / "confusion_matrix_comparison.csv"
 
 RANDOM_STATE = 42
 LABEL_COLUMN = "label"
-EXPECTED_LABELS = ["Paper", "Scissors", "Rock", "Thumb"]
+EXPECTED_LABELS = [
+    "clasp",
+    "down",
+    "home",
+    "lb",
+    "left",
+    "leftrunning",
+    "lt",
+    "paper",
+    "rb",
+    "right",
+    "rock",
+    "rt",
+    "scissors",
+    "thumb",
+    "up",
+]
 
 
 def load_dataset() -> tuple[pd.DataFrame, pd.Series]:
@@ -69,7 +85,7 @@ def load_dataset() -> tuple[pd.DataFrame, pd.Series]:
     if missing_labels:
         raise ValueError(
             f"Dataset is missing required labels: {missing_labels}. "
-            "Make sure gesture_data_sample contains paper, scissors, rock, and thumb, "
+            "Make sure gesture_data_sample contains all 15 gesture folders, "
             "then rerun: python extract_features.py"
         )
 
@@ -198,7 +214,7 @@ def main() -> None:
     X_test_scaled = scaler.transform(X_test)
 
     models = {
-        "SVM_RBF": SVC(kernel="rbf", probability=True),
+        "SVM_RBF": SVC(kernel="rbf", probability=True, class_weight="balanced"),
         "KNN_5": KNeighborsClassifier(n_neighbors=5),
     }
 
