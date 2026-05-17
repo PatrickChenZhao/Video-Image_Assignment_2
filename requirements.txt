@@ -17,3 +17,6 @@ protobuf
 
 vgamepad
 psutil
+
+matplotlib
+seaborn
