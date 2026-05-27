@@ -32,7 +32,7 @@ DEBOUNCE_FRAMES = 3
 HAND_SVM_INTERVAL_FRAMES = 2
 
 # Left-arm shoulder-anchored virtual joystick settings.
-SAVJ_DEAD_ZONE_PIXELS = 40
+SAVJ_DEAD_ZONE_PIXELS = 2 
 SAVJ_R_MAX_PIXELS = 150
 XINPUT_AXIS_MAX = 32767
 CONTROL_LEFT_SHOULDER_LANDMARK = 11
@@ -451,7 +451,8 @@ def update_savj(frame, pose_landmarks) -> tuple[int, int, bool]:
         return 0, 0, False
 
     (shoulder_x, shoulder_y), (wrist_x, wrist_y) = shoulder_wrist_pixels
-    rel_x = wrist_x - shoulder_x
+    # Front-facing camera coordinates mirror physical left/right movement.
+    rel_x = shoulder_x - wrist_x
     rel_y = shoulder_y - wrist_y
     distance = math.hypot(rel_x, rel_y)
 

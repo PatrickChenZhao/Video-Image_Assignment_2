@@ -1,3 +1,17 @@
-power shell：
+$t = Get-Date -Format "yyyyMMdd_HHmmss"; $i=1; Get-ChildItem -Path "C:\Users\chen\Downloads\eockjpg\ezgif-51259be407ee0a56-jpg" -Filter *.jpg | Sort-Object LastWriteTime | ForEach-Object { Rename-Item -LiteralPath $_.FullName -NewName ("$t-{0:D3}.jpg" -f $i); $i++ }
 
-$t = Get-Date -Format "yyyyMMdd_HHmmss"; $i=1; Get-ChildItem -Path "C:\Users\chen\Downloads\thumbup-jpg\ezgif-7716fdf7ea2b71a2-jpg" -Filter *.jpg | Sort-Object LastWriteTime | ForEach-Object { Rename-Item -LiteralPath $_.FullName -NewName ("$t-{0:D3}.jpg" -f $i); $i++ }
+Y--clasp
+十字键（下）--down
+菜单--home
+LB--lb
+十字键（左）--left
+按下左摇杆--leftrunning
+LT--lt
+A--paper
+RB--rb
+十字键（右）--right
+释放--rock
+RT-rt
+X--scissors
+B--thumb
+ 十字键（上）--up
